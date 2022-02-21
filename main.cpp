@@ -142,7 +142,7 @@ int main(int argc, char ** argv)
     }while(whether_continue);
 #endif // NO_MESH_REFINEMENT
 
-    // mesh.add_node_datum<double>("Bezier_t");
+    mesh.add_node_datum<double>("Bezier_t");
 
 
     mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
@@ -182,8 +182,7 @@ int main(int argc, char ** argv)
 
     // MPI_Barrier(init.comm().get());
     MPI_Barrier(MPI_COMM_WORLD);
-    
-    return 0;
+
     /*
      *
     std::vector<Complex> sol_vec;
