@@ -139,17 +139,18 @@ int main(int argc, char ** argv)
     }while(whether_continue);
 #endif // NO_MESH_REFINEMENT
 
-    mesh.add_node_datum<double>("Bezier_t");
+    // mesh.add_node_datum<double>("Bezier_t");
 
 
-    mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
+   //  mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
 
-    mesh_snap_to_Bezier(in_Bezier_P, in_Bezier_V, mesh, id_in_opt);
+    // mesh_snap_to_Bezier(in_Bezier_P, in_Bezier_V, mesh, id_in_opt);
 
     // output
     mesh.write(curr_params.out_mesh_file);
 
-    MPI_Barrier(init.comm().get());
+    // MPI_Barrier(init.comm().get());
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // eq systems
         // eq systems
@@ -176,8 +177,11 @@ int main(int argc, char ** argv)
 
 
 
-    MPI_Barrier(init.comm().get());
+    // MPI_Barrier(init.comm().get());
+    MPI_Barrier(MPI_COMM_WORLD);
+    return 0;    
     /*
+     *
     std::vector<Complex> sol_vec;
     eq_systems.build_solution_vector(sol_vec);
     std::cout<<sol_vec.size()<<'\n';
@@ -190,7 +194,7 @@ int main(int argc, char ** argv)
     // sol.setZero();
     get_data_vec(eq_systems.get_system("waveguide"), &sol, Ez_id);
 
-    Eigen::VectorXcd power_out;
+    Eigen::VectorXcd power_out(3);
     std::vector<subdomain_id_type> selected_domains = {4,5,6};
     integrate_along_side(eq_systems, selected_domains, power_out, N_poav_integrand);
 
@@ -205,7 +209,8 @@ int main(int argc, char ** argv)
     std::string integrate_name = integrate_stream.str();
 
 
-    MPI_Barrier(init.comm().get());
+    // MPI_Barrier(init.comm().get());
+    MPI_Barrier(MPI_COMM_WORLD);
 
     // Output
     for(unsigned int i = 0; i < mesh.n_processors(); i++)
@@ -222,8 +227,8 @@ int main(int argc, char ** argv)
             matfp.write_mat("N_process", N_processor, true);
             matfp.close();
         }
-        MPI_Barrier(init.comm().get());
-
+        // MPI_Barrier(init.comm().get());
+        MPI_Barrier(MPI_COMM_WORLD);
     }
     // MPI_Finalize();
     return 0;
@@ -253,8 +258,8 @@ void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, M
             curr_pt = Bezier_interp(Bezier_p, Bezier_V, t_vec, 0);
 
             // reset node
-            (*node)(0) = x_posi?curr_pt(0,0):-curr_pt(0,0);
-            (*node)(1) = y_posi?curr_pt(0,1):-curr_pt(0,1);
+            // (*node)(0) = x_posi?curr_pt(0,0):-curr_pt(0,0);
+            // (*node)(1) = y_posi?curr_pt(0,1):-curr_pt(0,1);
         }
     }
 }
