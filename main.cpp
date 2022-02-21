@@ -447,6 +447,7 @@ void assemble_waveguide(EquationSystems & es,
   subdomain_id_type wg_id = es.parameters.get<subdomain_id_type>("wg_id");
 
   // waveguide propagation constants
+  std::cout << waveguide_params->n_port;
   std::vector<double> beta(waveguide_params->n_port);
   std::complex<double> curr_value;
   int port_index;
@@ -545,6 +546,8 @@ void assemble_waveguide(EquationSystems & es,
   // refinement, we will be safe and will only consider the active
   // elements; hence we use a variant of the
   // active_local_element_ptr_range.
+
+            #ifndef DEBUG_UNEXPECTED_MPI_ABORT
   for (const auto & elem : mesh.active_local_element_ptr_range())
     {
       // Get the degree of freedom indices for the
@@ -588,6 +591,7 @@ void assemble_waveguide(EquationSystems & es,
 
       // Now loop over the quadrature points.  This handles
       // the numeric integration.
+
       for (unsigned int qp=0; qp<qrule.n_points(); qp++)
         {
           // Now we will build the element matrix.  This involves
@@ -619,7 +623,7 @@ void assemble_waveguide(EquationSystems & es,
         // The following loop is over the sides of the element.
         // If the element has no neighbor on a side then that
         // side MUST live on a boundary of the domain.
-    #ifndef DEBUG_UNEXPECTED_MPI_ABORT
+
         for (auto side : elem->side_index_range())
         {
          // get boundary id
@@ -752,7 +756,8 @@ void assemble_waveguide(EquationSystems & es,
       matrix.add_matrix (Ke, dof_indices);
       system.rhs->add_vector    (Fe, dof_indices);
       //std::cout << "5\n";
-    #endif // DEBUG_UNEXPECTED_MPI_ABORT
+
     }
+    #endif // DEBUG_UNEXPECTED_MPI_ABORT
   // All done!
 }
