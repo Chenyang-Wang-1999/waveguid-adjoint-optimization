@@ -1,0 +1,68 @@
+# depslib dependency file v1.0
+1645427250 source:/home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/2D_waveguide_model_params.cpp
+	"2D_waveguide_model_params.h"
+	<Eigen/Core>
+	<libmesh/getpot.h>
+	<string.h>
+	<MATio>
+	<math.h>
+	<iostream>
+
+1645380193 /home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/2D_waveguide_model_params.h
+	<string>
+	<Eigen/Core>
+	<complex.h>
+
+1645376238 source:/home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/Bezier.cpp
+	"Bezier.h"
+	<vector>
+	"TriDiagonal.h"
+	<Eigen/Core>
+	<iostream>
+
+1645373078 /home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/Bezier.h
+	<pybind11/pybind11.h>
+	<pybind11/eigen.h>
+	<Eigen/Core>
+
+1645364877 /home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/TriDiagonal.h
+	<vector>
+	<iostream>
+
+1645376461 source:/home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/EM_mesh_flagging.cpp
+	"EM_mesh_flagging.h"
+	<libmesh/mesh.h>
+	<libmesh/elem.h>
+	<libmesh/boundary_info.h>
+
+1645365945 /home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/EM_mesh_flagging.h
+	<libmesh/mesh_refinement.h>
+	<libmesh/mesh.h>
+	<vector>
+
+1645412381 source:/home/wangchenyang/Element/FEM/adjoint_optimization/waveguide_optimization/main.cpp
+	<libmesh/libmesh.h>
+	<libmesh/mesh.h>
+	<libmesh/mesh_base.h>
+	<libmesh/mesh_refinement.h>
+	<libmesh/elem.h>
+	<libmesh/boundary_info.h>
+	<libmesh/equation_systems.h>
+	<libmesh/linear_implicit_system.h>
+	<libmesh/sparse_matrix.h>
+	<libmesh/numeric_vector.h>
+	<libmesh/fe.h>
+	<libmesh/parameters.h>
+	<libmesh/fem_context.h>
+	<libmesh/dof_map.h>
+	<libmesh/quadrature_gauss.h>
+	<libmesh/getpot.h>
+	<MATio>
+	<math.h>
+	<iostream>
+	<Eigen/Core>
+	<mpi.h>
+	"EM_mesh_flagging.h"
+	"2D_waveguide_model_params.h"
+	"Bezier.h"
+
