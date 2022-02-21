@@ -37,7 +37,7 @@ WaveguideParams::WaveguideParams(std::string getpot_filename)
     matfp.read_mat(port_incidence_on_varname.data(), port_incidence_on);
     matfp.close();
 
-    //n_port = port_id.size();
+    n_port = port_id.size();
 
     #ifdef DEBUG
         std::cout << port_id_varname.data() <<'\n';

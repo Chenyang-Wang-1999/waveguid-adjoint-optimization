@@ -42,7 +42,7 @@
     #define WEXTRAP
 #endif // DEBUG
 
-#define DEBUG_UNEXPECTED_MPI_ABORT
+// #define DEBUG_UNEXPECTED_MPI_ABORT
 
 
 // My functions
@@ -145,9 +145,9 @@ int main(int argc, char ** argv)
     // mesh.add_node_datum<double>("Bezier_t");
 
 
-   //  mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
+    mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
 
-    // mesh_snap_to_Bezier(in_Bezier_P, in_Bezier_V, mesh, id_in_opt);
+    mesh_snap_to_Bezier(in_Bezier_P, in_Bezier_V, mesh, id_in_opt);
 
     // output
     mesh.write(curr_params.out_mesh_file);
@@ -176,12 +176,13 @@ int main(int argc, char ** argv)
     eq_systems.print_info();
 
     // solve
-    // eq_systems.get_system("waveguide").solve();
-    assemble_waveguide(eq_systems,"waveguide");
+    eq_systems.get_system("waveguide").solve();
+    // assemble_waveguide(eq_systems,"waveguide");
 
 
     // MPI_Barrier(init.comm().get());
     MPI_Barrier(MPI_COMM_WORLD);
+    
     return 0;
     /*
      *
@@ -261,8 +262,8 @@ void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, M
             curr_pt = Bezier_interp(Bezier_p, Bezier_V, t_vec, 0);
 
             // reset node
-            // (*node)(0) = x_posi?curr_pt(0,0):-curr_pt(0,0);
-            // (*node)(1) = y_posi?curr_pt(0,1):-curr_pt(0,1);
+            (*node)(0) = x_posi?curr_pt(0,0):-curr_pt(0,0);
+            (*node)(1) = y_posi?curr_pt(0,1):-curr_pt(0,1);
         }
     }
 }
@@ -445,12 +446,14 @@ void assemble_waveguide(EquationSystems & es,
   double freq = es.parameters.get<double>("freq");
   double omega = 2*M_PI*freq;
   subdomain_id_type wg_id = es.parameters.get<subdomain_id_type>("wg_id");
-#ifndef DEBUG_UNEXPECTED_MPI_ABORT
+
   // waveguide propagation constants
-  std::cout << waveguide_params->n_port;
+  // std::cout << waveguide_params->n_port;
   std::vector<double> beta(waveguide_params->n_port);
   std::complex<double> curr_value;
   int port_index;
+
+  #ifndef DEBUG_UNEXPECTED_MPI_ABORT
   for(port_index = 0; port_index < waveguide_params->n_port; port_index ++)
   {
     beta[port_index] = waveguide_params->port_other_params(3, port_index);
