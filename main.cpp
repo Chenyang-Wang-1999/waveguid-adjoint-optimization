@@ -42,6 +42,9 @@
     #define WEXTRAP
 #endif // DEBUG
 
+#define DEBUG_UNEXPECTED_MPI_ABORT
+
+
 // My functions
 #include "EM_mesh_flagging.h"
 #include "2D_waveguide_model_params.h"
@@ -174,12 +177,12 @@ int main(int argc, char ** argv)
 
     // solve
     // eq_systems.get_system("waveguide").solve();
-    // assemble_waveguide(eq_systems,"waveguide");
+    assemble_waveguide(eq_systems,"waveguide");
 
 
     // MPI_Barrier(init.comm().get());
     MPI_Barrier(MPI_COMM_WORLD);
-    return 0;    
+    return 0;
     /*
      *
     std::vector<Complex> sol_vec;
@@ -617,6 +620,7 @@ void assemble_waveguide(EquationSystems & es,
         // The following loop is over the sides of the element.
         // If the element has no neighbor on a side then that
         // side MUST live on a boundary of the domain.
+    #ifndef DEBUG_UNEXPECTED_MPI_ABORT
         for (auto side : elem->side_index_range())
         {
          // get boundary id
@@ -732,6 +736,7 @@ void assemble_waveguide(EquationSystems & es,
 
               }
             }
+    #endif // DEBUG_UNEXPECTED_MPI_ABORT
       }
       //std::cout << "4\n";
       // We have now finished the quadrature point loop,
