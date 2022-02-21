@@ -156,7 +156,7 @@ int main(int argc, char ** argv)
         // eq systems
     EquationSystems eq_systems(mesh);
     eq_systems.add_system<LinearImplicitSystem>("waveguide");
-    eq_systems.get_system("waveguide").add_variable("Ez", FIRST);
+    eq_systems.get_system("waveguide").add_variable("Ez", SECOND);
     eq_systems.get_system("waveguide").attach_assemble_function(assemble_waveguide);
     eq_systems.parameters.set<double>("epsilon_wg") = epsilon_wg;
     eq_systems.parameters.set<double>("epsilon_amb") = epsilon_air;
@@ -173,8 +173,8 @@ int main(int argc, char ** argv)
     eq_systems.print_info();
 
     // solve
-    eq_systems.get_system("waveguide").solve();
-
+    // eq_systems.get_system("waveguide").solve();
+    // assemble_waveguide(eq_systems,"waveguide");
 
 
     // MPI_Barrier(init.comm().get());
@@ -654,7 +654,7 @@ void assemble_waveguide(EquationSystems & es,
               is_port = false;
               for(port_index = 0; port_index < waveguide_params->n_port; port_index ++)
               {
-                if(mesh_boundary.has_boundary_id(elem, side, waveguide_params->port_id(port_index)))
+	       if(mesh_boundary.has_boundary_id(elem, side, waveguide_params->port_id(port_index)))
                 {
             #ifdef DEBUG
                 std::cout << "current id:" << waveguide_params->port_id(port_index) <<'\n';
