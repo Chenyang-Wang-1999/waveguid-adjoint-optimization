@@ -616,7 +616,6 @@ void assemble_waveguide(EquationSystems & es,
         }
 
 
-      {
         // The following loop is over the sides of the element.
         // If the element has no neighbor on a side then that
         // side MUST live on a boundary of the domain.
@@ -736,8 +735,8 @@ void assemble_waveguide(EquationSystems & es,
 
               }
             }
-    #endif // DEBUG_UNEXPECTED_MPI_ABORT
-      }
+
+
       //std::cout << "4\n";
       // We have now finished the quadrature point loop,
       // and have therefore applied all the boundary conditions.
@@ -753,7 +752,7 @@ void assemble_waveguide(EquationSystems & es,
       matrix.add_matrix (Ke, dof_indices);
       system.rhs->add_vector    (Fe, dof_indices);
       //std::cout << "5\n";
-
+    #endif // DEBUG_UNEXPECTED_MPI_ABORT
     }
   // All done!
 }
