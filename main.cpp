@@ -445,7 +445,7 @@ void assemble_waveguide(EquationSystems & es,
   double freq = es.parameters.get<double>("freq");
   double omega = 2*M_PI*freq;
   subdomain_id_type wg_id = es.parameters.get<subdomain_id_type>("wg_id");
-
+#ifndef DEBUG_UNEXPECTED_MPI_ABORT
   // waveguide propagation constants
   std::cout << waveguide_params->n_port;
   std::vector<double> beta(waveguide_params->n_port);
@@ -547,7 +547,7 @@ void assemble_waveguide(EquationSystems & es,
   // elements; hence we use a variant of the
   // active_local_element_ptr_range.
 
-            #ifndef DEBUG_UNEXPECTED_MPI_ABORT
+
   for (const auto & elem : mesh.active_local_element_ptr_range())
     {
       // Get the degree of freedom indices for the
