@@ -42,8 +42,7 @@
     #define WEXTRAP
 #endif // DEBUG
 
-// #define DEBUG_UNEXPECTED_MPI_ABORT
-
+#define DEBUG_ASSEMBLE_DKDP
 
 // My functions
 #include "EM_mesh_flagging.h"
@@ -214,6 +213,9 @@ int main(int argc, char ** argv)
     curr_system.add_vector("middle_vec");
     curr_system.add_matrix("dKdp");
     NumericVector<Number> & middle_vec = curr_system.get_vector("middle_vec");
+
+    std::cout << curr_system.get_vector("middle_vec").initialized();
+
     for(unsigned int dim_id = 0; dim_id < ex_Bezier_P.cols(); dim_id++)
     {
         for(unsigned int point_id = 0; point_id < ex_Bezier_P.rows(); point_id++)
@@ -223,14 +225,15 @@ int main(int argc, char ** argv)
 
             curr_system.get_vector("middle_vec").zero();
             curr_system.get_matrix("dKdp").zero();
-            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
-                    id_ex_opt, ex_Bezier_P, ex_Bezier_V);
-            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), eq_systems.get_system("waveguide").get_vector("Ez"));
+            //assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
+            //        id_ex_opt, ex_Bezier_P, ex_Bezier_V);
+            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), * eq_systems.get_system("waveguide").solution);
 
-            ex_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
+            //ex_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
         }
     }
 
+    return 0;
     for(unsigned int dim_id = 0; dim_id < in_Bezier_P.cols(); dim_id++)
     {
         for(unsigned int point_id = 0; point_id < in_Bezier_P.rows(); point_id++)
@@ -239,7 +242,7 @@ int main(int argc, char ** argv)
             curr_system.get_matrix("dKdp").zero();
             assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
                     id_in_opt, in_Bezier_P, in_Bezier_V);
-            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), eq_systems.get_system("waveguide").get_vector("Ez"));
+            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), *  eq_systems.get_system("waveguide").solution);
 
             in_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
         }
@@ -601,7 +604,6 @@ void assemble_waveguide(EquationSystems & es,
   std::complex<double> curr_value;
   int port_index;
 
-  #ifndef DEBUG_UNEXPECTED_MPI_ABORT
   for(port_index = 0; port_index < waveguide_params->n_port; port_index ++)
   {
     beta[port_index] = waveguide_params->port_other_params(3, port_index);
@@ -931,7 +933,6 @@ void assemble_waveguide(EquationSystems & es,
       //std::cout << "5\n";
 
     }
-    #endif // DEBUG_UNEXPECTED_MPI_ABORT
   // All done!
 }
 
@@ -1081,6 +1082,8 @@ void assemble_sensitivity_K(System & system, Parameters & params,
     DenseMatrix<Number> Ke;
     std::vector<dof_id_type> dof_indices;
 
+    #ifndef DEBUG_ASSEMBLE_DKDP
+
     for(Elem* elem: mesh.active_local_element_ptr_range())
     {
         if(elem->subdomain_id() == wg_id)
@@ -1151,7 +1154,7 @@ void assemble_sensitivity_K(System & system, Parameters & params,
             }
         }
     }
-
+#endif // DEBUG_ASSEMBLE_DKDP
 
 
 }
