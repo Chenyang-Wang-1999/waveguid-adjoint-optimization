@@ -62,15 +62,20 @@ void integrate_along_side(
                       std::vector<subdomain_id_type> & selected_domain,
                       Eigen::VectorXcd & integration_value,
                       Number (*integrand)( Parameters&,
-                FEMContext&)
+                        FEMContext&),
+                      unsigned int parent_domain_id=0
                     );
 Number N_poav_integrand( Parameters& params,
                 FEMContext& context);
+Number mode_decompose(Parameters & params, FEMContext & context );
 void get_data_vec(System &sys, Eigen::VectorXcd *sol, int varid);
 void assemble_waveguide(EquationSystems & es,
                       const std::string & libmesh_dbg_var(system_name));
+void assemble_QOI_rhs(System & system, const Parameters & params);
 
-
+void assemble_sensitivity_K(System & system, Parameters & params,
+        SparseMatrix<Number> & dKdp, unsigned int point_id, unsigned int dim_id,
+        boundary_id_type boundary_id, const Eigen::MatrixXd & Bezier_p, const Eigen::MatrixXd & Bezier_v);
 
 int main(int argc, char ** argv)
 {
@@ -97,6 +102,7 @@ int main(int argc, char ** argv)
     double mu_wg = infile("mu_wg", 1.0);
     double mu_amb = infile("mu_amb", 1.0);
     double freq = infile("freq",1.0);
+    unsigned int save_field = infile("save_field",0);
     std::string result_mat_name = infile("result_mat_name",std::string());
     subdomain_id_type id_wg = mesh.get_id_by_name("waveguide");
     subdomain_id_type id_input = mesh_bd.get_id_by_name("input");
@@ -183,6 +189,62 @@ int main(int argc, char ** argv)
     // MPI_Barrier(init.comm().get());
     MPI_Barrier(MPI_COMM_WORLD);
 
+
+    // Get S params and Solve adjoint problem
+    // Get S params
+    Eigen::VectorXcd S_params(4);
+    std::vector<subdomain_id_type> selected_domains = {3,4,5,6};
+    integrate_along_side(eq_systems, selected_domains, S_params, mode_decompose);
+
+    // Solve adjoint problem
+    unsigned int selected_port = 1; // output 1
+    eq_systems.parameters.set<Complex>("curr_S") = S_params(selected_port);
+    eq_systems.parameters.set<subdomain_id_type>("QOI_port") = selected_port;
+    assemble_QOI_rhs(eq_systems.get_system("waveguide"), eq_systems.parameters);
+    eq_systems.get_system("waveguide").assemble_before_solve = false;
+    eq_systems.get_system("waveguide").adjoint_solve();
+
+    // Get all sensitivity
+    Eigen::MatrixXd ex_opt_sens(ex_Bezier_P.rows(), ex_Bezier_P.cols());
+    Eigen::MatrixXd in_opt_sens(in_Bezier_P.rows(), in_Bezier_P.cols());
+
+
+    // std::unique_ptr< NumericVector< Number > > adjoint_copy = eq_systems.get_system("waveguide").get_adjoint_solution(0).clone();
+    System & curr_system = eq_systems.get_system("waveguide");
+    curr_system.add_vector("middle_vec");
+    curr_system.add_matrix("dKdp");
+    NumericVector<Number> & middle_vec = curr_system.get_vector("middle_vec");
+    for(unsigned int dim_id = 0; dim_id < ex_Bezier_P.cols(); dim_id++)
+    {
+        for(unsigned int point_id = 0; point_id < ex_Bezier_P.rows(); point_id++)
+        {
+            // SparseMatrix<Number> dKdp(init.comm());
+            // NumericVector<Number> middle_vec(init.comm());
+
+            curr_system.get_vector("middle_vec").zero();
+            curr_system.get_matrix("dKdp").zero();
+            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
+                    id_ex_opt, ex_Bezier_P, ex_Bezier_V);
+            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), eq_systems.get_system("waveguide").get_vector("Ez"));
+
+            ex_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
+        }
+    }
+
+    for(unsigned int dim_id = 0; dim_id < in_Bezier_P.cols(); dim_id++)
+    {
+        for(unsigned int point_id = 0; point_id < in_Bezier_P.rows(); point_id++)
+        {
+            curr_system.get_vector("middle_vec").zero();
+            curr_system.get_matrix("dKdp").zero();
+            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
+                    id_in_opt, in_Bezier_P, in_Bezier_V);
+            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), eq_systems.get_system("waveguide").get_vector("Ez"));
+
+            in_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
+        }
+    }
+
     /*
      *
     std::vector<Complex> sol_vec;
@@ -194,27 +256,22 @@ int main(int argc, char ** argv)
     processor_id_type curr_id = mesh.processor_id();
 
     static Eigen::VectorXcd sol(eq_systems.get_system("waveguide").n_dofs());
-    // sol.setZero();
-    get_data_vec(eq_systems.get_system("waveguide"), &sol, Ez_id);
-
-    Eigen::VectorXcd power_out(3);
-    std::vector<subdomain_id_type> selected_domains = {4,5,6};
-    integrate_along_side(eq_systems, selected_domains, power_out, N_poav_integrand);
-
-
     std::stringstream varname_stream;
     varname_stream << "Ez_" << curr_id;
     std::string varname = varname_stream.str();
+    if(save_field)
+    {
+        // sol.setZero();
+        get_data_vec(eq_systems.get_system("waveguide"), &sol, Ez_id);
+
+    }
+
+
 
 
     std::stringstream integrate_stream;
-    integrate_stream << "power_out_" << curr_id;
+    integrate_stream << "S_params_" << curr_id;
     std::string integrate_name = integrate_stream.str();
-
-
-    // MPI_Barrier(init.comm().get());
-    MPI_Barrier(MPI_COMM_WORLD);
-
     // Output
     for(unsigned int i = 0; i < mesh.n_processors(); i++)
     {
@@ -223,15 +280,25 @@ int main(int argc, char ** argv)
         if(i == curr_id)
         {
             matio::MatioFile matfp(result_mat_name);
-            matfp.write_mat(varname.data(), sol,true);
-            matfp.write_mat(integrate_name.data(), power_out, true);
-            Eigen::VectorXi N_processor(1);
-            N_processor(0) = mesh.n_processors();
-            matfp.write_mat("N_process", N_processor, true);
+            if(save_field)
+            {
+                matfp.write_mat(varname.data(), sol,true);
+            }
+            matfp.write_mat(integrate_name.data(), S_params, true);
             matfp.close();
         }
         // MPI_Barrier(init.comm().get());
         MPI_Barrier(MPI_COMM_WORLD);
+    }
+    if(curr_id == 0)
+    {
+        matio::MatioFile matfp(result_mat_name);
+        Eigen::VectorXi N_processor(1);
+        N_processor(0) = mesh.n_processors();
+        matfp.write_mat("N_process", N_processor, true);
+        matfp.write_mat("ex_opt_sens", ex_opt_sens, true);
+        matfp.write_mat("in_opt_sens", in_opt_sens, true);
+        matfp.close();
     }
     // MPI_Finalize();
     return 0;
@@ -268,12 +335,14 @@ void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, M
 }
 
 
+
 void integrate_along_side(
                       EquationSystems & es,
                       std::vector<subdomain_id_type> & selected_domain,
                       Eigen::VectorXcd & integration_value,
                       Number (*integrand)( Parameters&,
-                FEMContext&)
+                        FEMContext&),
+                      unsigned int parent_domain_id
                     )
 {
   // It is a good idea to make sure we are assembling
@@ -302,6 +371,13 @@ void integrate_along_side(
       // contribute to.
       context.pre_fe_reinit(sys,elem);
       context.elem_fe_reinit();
+      bool use_curr_elem = true;
+      if(parent_domain_id)
+      {
+        use_curr_elem = (context.get_elem().subdomain_id() == parent_domain_id);
+      }
+
+      if(use_curr_elem)
       {
 
         // The following loop is over the sides of the element.
@@ -322,8 +398,8 @@ void integrate_along_side(
                     // std::cout << integration_value(integral_id) <<'\n';
                 }
             }
+        }
       }
-    }
   // All done!
   }
 }
@@ -400,6 +476,78 @@ Number N_poav_integrand( Parameters& params,
     return result;
 }
 
+Number mode_decompose(Parameters & params, FEMContext & context )
+{
+    // decompose the field to the corresponding port mode
+    subdomain_id_type wg_id = params.get<subdomain_id_type>("wg_id");
+    double epsilon, mu;
+    if(context.get_elem().subdomain_id() == wg_id)
+    {
+        epsilon = params.get<double>("epsilon_wg");
+        mu = params.get<double>("mu_wg");
+    }
+    else
+    {
+        epsilon = params.get<double>("epsilon_amb");
+        mu = params.get<double>("mu_amb");
+    }
+    double freq = params.get<double> ("freq");
+    double omega = 2*M_PI*freq;
+
+    WaveguideParams * wg_params = params.get<WaveguideParams*>("waveguide_params");
+
+    // get boundary fe
+    FEBase* fe_face;
+    fe_face = context.get_side_fe(0); // var0: Ez
+
+    // The XYZ locations (in physical space) of the
+    // quadrature points on the face.  This is where
+    // we will interpolate the boundary value function.
+    const std::vector<Point> & q_point = fe_face->get_xyz();
+    const std::vector<Real> & JxW = fe_face -> get_JxW();
+    const std::vector<Point> & normal = fe_face -> get_normals();
+
+    // Compute the shape function values on the element
+    // face.
+
+    Number result = 0.0;
+
+    for(unsigned int curr_port = 0; curr_port < wg_params ->n_port; curr_port ++)
+    {
+        if(context.has_side_boundary_id(wg_params->port_id(curr_port)))
+        {
+            for(unsigned int qp = 0; qp < JxW.size(); qp ++)
+            {
+                Number Ez_qp = context.side_value(0,qp);
+                Gradient Ez_grad = context.side_gradient(0, qp);
+
+                Number Hx_qp = - (Complex(1j)/(omega*mu)) * Ez_grad(1);
+                Number Hy_qp = (Complex(1j)/(omega*mu)) * Ez_grad(0);
+
+                Eigen::Vector3d pt_vec = {q_point[qp](0), q_point[qp](1), 0};
+                Number mode_Dz_qp, mode_Bx_qp, mode_By_qp;
+                wg_params ->analytic_E_field(pt_vec, curr_port, omega, mode_Dz_qp, true, WaveguideModes::Dz);
+                wg_params ->analytic_E_field(pt_vec, curr_port, omega, mode_Bx_qp, true, WaveguideModes::Bx);
+                wg_params ->analytic_E_field(pt_vec, curr_port, omega, mode_By_qp, true, WaveguideModes::By);
+
+                result += (std::conj(mode_Dz_qp)*Ez_qp + std::conj(mode_Bx_qp)*Hx_qp + std::conj(mode_By_qp)*Hy_qp)*JxW[qp]/4;
+                /* debug
+                std::cout << "Ez: " << Ez_qp <<'\n';
+                std::cout << "Hx: " << Hx_qp <<'\n';
+                std::cout << "Hy: " << Hy_qp << '\n';
+                std::cout << "Poavx: " << Poavx_qp <<'\n';
+                std::cout << "Poavy: " << Poavy_qp << '\n';
+                std::cout << "current_normal: "<< nx <<", "<< ny <<'\n';
+                std::cout << "norm of normal: "<< normal_norm <<'\n';
+                std::cout << "nPoav: " << nPoav <<'\n';
+                std::cout <<"result: "<<result <<'\n';
+                //*/
+            }
+        }
+    }
+    return result;
+}
+
 void get_data_vec(System &sys, Eigen::VectorXcd *sol, int varid)
 {
     // get data vector by FEM context
@@ -407,6 +555,7 @@ void get_data_vec(System &sys, Eigen::VectorXcd *sol, int varid)
     const DofMap & dof_map = sys.get_dof_map();
     const BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
     NumericVector<Number> & sys_sol = *sys.solution;
+    sol->setZero();
 
     // localize
     int i = 0;
@@ -698,7 +847,7 @@ void assemble_waveguide(EquationSystems & es,
                     {
                         Eigen::Vector3d pt = {qface_point[qp](0), qface_point[qp](1), 0.0};
                         std::complex<double> E0;
-                        waveguide_params ->analytic_E_field(pt, port_index, omega, E0, true);
+                        waveguide_params ->analytic_E_field(pt, port_index, omega, E0, true, WaveguideModes::Ez);
                         // FEM_q = (-(2.0*1j)*beta[port_index])*E0;
                     #ifdef DEBUG
                         std::cout << E0<<'\n';
@@ -724,6 +873,8 @@ void assemble_waveguide(EquationSystems & es,
                     {
                       // The location on the boundary of the current
 
+
+                        /* PEC
                       // The penalty value.  \frac{1}{\epsilon}
                       // in the discussion above.
                       const Real penalty = 1.e20;
@@ -735,6 +886,26 @@ void assemble_waveguide(EquationSystems & es,
                           Ke(i,j) += JxW_face[qp]*penalty*phi_face[i][qp]*phi_face[j][qp];
                         }
                       // Right-hand-side contribution of the L2
+                      //*/
+
+                      // Scattering BC
+                      FEM_gamma = - Complex(1j)*sqrt(epsilon_amb*mu_amb)*omega;
+
+                        // Assemble K, the same
+                        for (unsigned int qp=0; qp<qface.n_points(); qp++)
+                        {
+                          // Matrix contribution of the L2 projection.
+
+                          for (unsigned int i=0; i != n_dofs; i++)
+                          {
+                            for (unsigned int j=0; j != n_dofs; j++)
+                            {
+                              Ke(i,j) += JxW_face[qp]*FEM_gamma*phi_face[i][qp]*phi_face[j][qp];
+                            }
+                          // Right-hand-side contribution of the L2
+                          }
+                        }
+
                     }
               }
 
@@ -762,4 +933,225 @@ void assemble_waveguide(EquationSystems & es,
     }
     #endif // DEBUG_UNEXPECTED_MPI_ABORT
   // All done!
+}
+
+void assemble_QOI_rhs(System & system, const Parameters & params)
+{
+    NumericVector<Number> * adjoint_rhs;
+    if(system.n_qois())
+    {
+        // qoi has been defined
+        adjoint_rhs = &system.get_adjoint_rhs(0);
+    }
+    else
+    {
+        adjoint_rhs = &system.add_adjoint_rhs(0);
+    }
+
+    // get parameters
+    WaveguideParams* wg_params = params.get<WaveguideParams*>("waveguide_params");
+    subdomain_id_type which_port = params.get<subdomain_id_type>("QOI_port");
+    double freq = params.get<double>("freq");
+    Number S = params.get<Number>("curr_S");
+    double omega = freq*2*M_PI;
+    subdomain_id_type port_id = wg_params ->port_id(which_port);
+
+    // get mesh
+    MeshBase & mesh = system.get_mesh();
+    BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
+
+    const unsigned int dim = mesh.mesh_dimension();
+
+    const DofMap & dof_map = system.get_dof_map();
+    FEType fe_type = dof_map.variable_type(0);
+    std::unique_ptr<FEBase> fe_face (FEBase::build(dim, fe_type));
+    QGauss qface(dim-1, FIFTH);
+    fe_face->attach_quadrature_rule (&qface);
+
+    DenseVector<Number> Fe;
+    std::vector<dof_id_type> dof_indices;
+
+
+    for (const auto & elem : mesh.active_local_element_ptr_range())
+    {
+        dof_map.dof_indices (elem, dof_indices);
+            const unsigned int n_dofs =
+        cast_int<unsigned int>(dof_indices.size());
+        Fe.resize (n_dofs);
+
+        // The following loop is over the sides of the element.
+        // If the element has no neighbor on a side then that
+        // side MUST live on a boundary of the domain.
+
+        for (auto side : elem->side_index_range())
+        {
+         // get boundary id
+
+          if (elem->neighbor_ptr(side) == nullptr)
+          {
+              if(mesh_boundary.has_boundary_id(elem, side, port_id))
+              {
+                fe_face->reinit(elem, side);
+                // Integration: \int 1/4 (D_mode^*\cdot E + H_mode^* \cdot B)
+                // Bx = - i /omega \partial_y E^z
+                // By = i / omega  \partial_x E^z
+                const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
+                const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
+                const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
+                const std::vector<Real> & JxW_face = fe_face->get_JxW();
+                const std::vector<Point> & qface_point = fe_face->get_xyz();
+
+                // Integrate
+                for(unsigned int i = 0; i < n_dofs; i++)
+                {
+                    for(unsigned int qp = 0; qp < JxW_face.size(); qp++)
+                    {
+                    //IEEE TRANSACTIONS ON MAGNETICS, VOL. 46, NO. 8, AUGUST 2010
+                        Eigen::Vector3d pt_vec = {qface_point[qp](0), qface_point[qp](1), qface_point[qp](2)};
+                        Complex mode_Dz, mode_Hx, mode_Hy;
+                        wg_params->analytic_E_field(pt_vec, which_port, omega, mode_Dz, true, WaveguideModes::Dz);
+                        wg_params->analytic_E_field(pt_vec, which_port, omega, mode_Hx, true, WaveguideModes::Hx);
+                        wg_params->analytic_E_field(pt_vec, which_port, omega, mode_Hy, true, WaveguideModes::Hy);
+
+                        Number dBxdA = - Complex(1j)/omega * dphidy_face[i][qp];
+                        Number dBydA = Complex(1j)/omega * dphidx_face[i][qp];
+
+                        Number dSdA = (std::conj(mode_Dz)*phi_face[i][qp] +
+                                    std::conj(mode_Hx)*dBxdA +
+                                    std::conj(mode_Hy)*dBydA
+                                    )/4;
+                        Fe(i) += 2*std::real(std::conj(S)*dSdA) + 2*Complex(1j)*std::imag(std::conj(S)*dSdA);
+                    }
+                }
+
+              }
+          }
+        }
+
+
+      //std::cout << "4\n";
+      // We have now finished the quadrature point loop,
+      // and have therefore applied all the boundary conditions.
+
+      // If this assembly program were to be used on an adaptive mesh,
+      // we would have to apply any hanging node constraint equations
+      dof_map.constrain_element_vector(Fe, dof_indices);
+
+      adjoint_rhs->add_vector    (Fe, dof_indices);
+      //std::cout << "5\n";
+
+    }
+}
+
+void assemble_sensitivity_K(System & system, Parameters & params,
+        SparseMatrix<Number> & dKdp, unsigned int point_id, unsigned int dim_id,
+        boundary_id_type boundary_id, const Eigen::MatrixXd & Bezier_p, const Eigen::MatrixXd & Bezier_v)
+{
+    Eigen::MatrixXd Sens_v = Bezier_V_sensitivity(point_id, dim_id, Bezier_p, 0, 1, Bezier_v.row(0), Bezier_v.row(0), true);
+    Eigen::MatrixXd Sens_p(Bezier_p.rows(), Bezier_p.cols());
+    Sens_p.setZero();
+    Sens_p(point_id, dim_id) = 1;
+
+    // loop around the geometry, and integrate around the boundary
+    // get parameters
+    subdomain_id_type which_boundary = boundary_id;
+    subdomain_id_type wg_id = params.get<subdomain_id_type>("wg_id");
+    double freq = params.get<double>("freq");
+    double epsilon_wg = params.get<double>("epsilon_wg");
+    double epsilon_amb = params.get<double>("epsilon_amb");
+    double mu_wg = params.get<double>("mu_wg");
+    double mu_amb = params.get<double>("mu_amb");
+    double omega = freq*2*M_PI;
+
+    // FEM_beta = - pow(omega, 2) * epsilon * mu
+    double Delta_FEM_beta = - pow(omega, 2) * epsilon_wg * mu_wg + pow(omega, 2) * epsilon_amb * mu_amb;
+
+    // get mesh
+    MeshBase & mesh = system.get_mesh();
+    BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
+
+    const unsigned int dim = mesh.mesh_dimension();
+
+    const DofMap & dof_map = system.get_dof_map();
+    FEType fe_type = dof_map.variable_type(0);
+    std::unique_ptr<FEBase> fe_face (FEBase::build(dim, fe_type));
+    QGauss qface(dim-1, FIFTH);
+    fe_face->attach_quadrature_rule (&qface);
+
+    DenseMatrix<Number> Ke;
+    std::vector<dof_id_type> dof_indices;
+
+    for(Elem* elem: mesh.active_local_element_ptr_range())
+    {
+        if(elem->subdomain_id() == wg_id)
+        {
+            for(auto side:elem->side_index_range())
+            {
+                if(mesh_boundary.has_boundary_id(elem, side, which_boundary))
+                {
+                    dof_map.dof_indices (elem, dof_indices);
+                    const unsigned int n_dofs =
+                        cast_int<unsigned int>(dof_indices.size());
+                    Ke.resize (n_dofs, n_dofs);
+
+                    // reinitialize and get fe data
+                    fe_face->reinit(elem, side);
+                    const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
+                    const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
+                    const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
+                    const std::vector<Point> & normal_face = fe_face->get_normals();
+                    const std::vector<Real> & JxW_face = fe_face->get_JxW();
+                    const std::vector<Point> & qface_point = fe_face->get_xyz();
+
+                    // Bezier interpolation
+                    Eigen::VectorXd t_list(n_dofs);
+                    for(unsigned int i = 0; i < n_dofs; i++)
+                    {
+                        t_list(i) = elem->node_ptr(i) ->get_extra_datum<double>(0);
+                    }
+
+                    Eigen::MatrixXd P_sens = Bezier_interp(Sens_p, Sens_v, t_list, 0);
+                    Eigen::MatrixXd V_tan = Bezier_interp(Bezier_p, Bezier_v, t_list, 1);
+
+                    // normalize
+                    for(unsigned int i = 0; i<n_dofs; i++)
+                    {
+                        double norm_tangent = V_tan.row(i).norm();
+                        V_tan.row(i) /= norm_tangent;
+                    }
+
+                    // assemble matrix
+                    /* For FEM
+                            Ke(i,j) = JxW[qp]*(dphi[i][qp]*dphi[j][qp]) + JxW[qp]*FEM_beta*(phi[i][qp]*phi[j][qp]);
+                            FEM_beta = - pow(omega, 2) * epsilon * mu
+                       For sensitivity
+                            dKe(i,j) = \Delta FEM_beta*(phi[i][qp]*phi[j][qp]) dS
+                            where \Delta FEM_beta = {FEM_beta_wg - FEM_beta_amb  ,normalxtangent > 0 (+ indicates enlarging the waveguide)
+                                                    {- ...
+                    */
+
+                    for(unsigned int i = 0; i<n_dofs; i++)
+                    {
+                        for(unsigned int qp = 0; qp < JxW_face.size(); qp++)
+                        {
+                            bool enlarge = (normal_face[i](0)*V_tan(i,1) - normal_face[i](1)*V_tan(i, 0)>0); // normal(i) x  V_tan(i)
+                            double volume_elem = P_sens(i, 0) * V_tan(i, 1) - P_sens(i, 1)*V_tan(i, 0);     // P_sens(i) x V_tan(i)
+                            double curr_FEM_beta = enlarge? Delta_FEM_beta: - Delta_FEM_beta;
+                            for(unsigned int j = 0; j < n_dofs; j++)
+                            {
+                                Ke(i,j) += curr_FEM_beta * (phi_face[i][qp]*phi_face[j][qp]) * volume_elem * JxW_face[qp];
+
+                            }
+                        }
+                    }// for(i:dofs)
+
+                    dKdp.add_matrix(Ke, dof_indices);
+
+                }
+            }
+        }
+    }
+
+
+
 }

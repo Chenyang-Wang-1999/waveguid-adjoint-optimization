@@ -190,6 +190,55 @@ Eigen::MatrixXd Bezier_interp(const Eigen::MatrixXd &P, const Eigen::MatrixXd &V
 }
 //*/
 
+Eigen::MatrixXd Bezier_V_sensitivity(unsigned int id_P, unsigned int id_dim,
+        const Eigen::MatrixXd &P, unsigned int start_point_mode, unsigned int end_point_mode,
+        Eigen::VectorXd vec_start, Eigen::VectorXd vec_end, bool autoscale)
+{
+    unsigned int N_points = P.rows();
+    unsigned int dim = P.cols();
+
+    // Point sensitivity
+    Eigen::MatrixXd P_sens(N_points, dim);
+    P_sens.setZero();
+    P_sens(id_P, id_dim) = 1;
+
+    // start and end vectors
+    if(start_point_mode == 0)
+    {
+        if(id_P == 0 || id_P == 1)
+        {
+            if(autoscale)
+            {
+                double vec_norm = vec_start.norm();
+                double tan_vec_norm = (P.row(1) - P.row(0)).norm();
+                vec_start *= ( P(id_P,id_dim) - P((id_P+1)%2, id_dim) )/vec_norm/tan_vec_norm;
+            }
+        }
+        else
+        {
+            vec_start.setZero();
+        }
+    }
+
+    if(end_point_mode == 0)
+    {
+        if(id_P == N_points - 2 || id_P == N_points - 1)
+        {
+            if(autoscale)
+            {
+                double vec_norm = vec_end.norm();
+                double tan_vec_norm = (P.row(N_points - 1) - P.row(N_points - 2)).norm();
+                vec_end *= ( P(id_P,id_dim) - P((id_P+3-N_points)%2 + N_points - 2, id_dim) )/vec_norm/tan_vec_norm;
+            }
+        }
+        else
+        {
+            vec_end.setZero();
+        }
+    }
+
+    return Bezier_tangent_vector(P_sens, start_point_mode, end_point_mode, vec_start, vec_end, autoscale);
+}
 
 double Nearest_t(const Eigen::MatrixXd &P_ctrl, const Eigen::MatrixXd &V, Eigen::VectorXd pt, double AbsTol)
 {

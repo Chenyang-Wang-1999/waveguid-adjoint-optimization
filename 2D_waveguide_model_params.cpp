@@ -50,7 +50,8 @@ WaveguideParams::WaveguideParams(std::string getpot_filename)
 }//WaveguideParams::WaveguideParams
 
 
-void WaveguideParams::analytic_E_field(Eigen::Vector3d pt, int curr_port, double omega, std::complex<double>& value, bool normalize)
+void WaveguideParams::analytic_E_field(Eigen::Vector3d pt, int curr_port, double omega, std::complex<double>& value, bool normalize,
+    WaveguideModes::FieldComp which_field)
 {
     // get parameters
     // (amplitude, width, mode_index, beta, epsilon_wg, epsilon_amb, mu_wg, mu_amb)
@@ -69,87 +70,148 @@ void WaveguideParams::analytic_E_field(Eigen::Vector3d pt, int curr_port, double
     double omega_sq = omega*omega;
     double beta_sq = beta*beta;
 
-    // Get x coordinate
+    // Get y coordinate
     Eigen::Vector3d cen = port_coords.col(curr_port);
     Eigen::Vector3d rel_vec = pt - cen;
+    Eigen::Vector3d y_axis = port_x_axis.col(curr_port);
+    Eigen::Vector3d x_axis = {y_axis(1), - y_axis(0), 0};
     double x = rel_vec.dot(port_x_axis.col(curr_port));
 
-    // even mode or odd mode
-    // fundamental mode is 0
-    if(mode_index % 2)
+
+    if(which_field == WaveguideModes::Ex || which_field == WaveguideModes::Ey || which_field == WaveguideModes::Hz||
+        which_field == WaveguideModes::Dx || which_field == WaveguideModes::Dy || which_field == WaveguideModes::Bz)
     {
-        // odd mode
-        mode_energy = pow(sin(k*w/2), 2)*(epsilon_amb + beta_sq/(omega_sq*mu_amb))*exp(- kappa*w)/(4*kappa)
-                    + (epsilon_wg + beta_sq/(omega_sq*mu_wg))*(w - sin(k*w)/k)/8;
-        mode_flux = beta*pow(sin(k*w/2), 2)*exp(-kappa*w)/(2*kappa*omega*mu_amb)
-                    + beta*(w - sin(k*w)/k)/(4*omega*mu_wg);
-
-
-        double C_factor;
-        if(normalize)
-        {
-            C_factor = 1.0/sqrt(mode_energy);
-        }
-        else
-        {
-            double amplitude = port_other_params(0, curr_port);
-            C_factor = amplitude / sqrt(mode_flux);
-        }
-
-        // calculate the field
-        if(x < - w/2)
-        {
-            value = - C_factor * sin(k*w/2)*exp(kappa * x);
-        }
-        else if(x > w/2)
-        {
-            value = C_factor * sin(k*w/2) * exp(- kappa*x);
-        }
-        else
-        {
-            value = C_factor * sin(k*x);
-        }
+        value = 0.0;
     }
     else
     {
-        // even mode
-        mode_energy = pow(cos(k*w/2), 2)*(epsilon_amb + beta_sq/(omega_sq*mu_amb))*exp(-kappa*w)/(4*kappa)
-                        + (epsilon_wg + beta_sq/(omega_sq * mu_wg))*(w + sin(k*w)/k)/8;
-        mode_flux = beta*pow(cos(k*w/2),2) * exp(- kappa * w)/ (2 * kappa * omega * mu_amb)
-                        + beta * (w + sin(k*w)/k) / (4*omega*mu_wg);
-        /* debug
-        std::cout << "x = " << x <<'\n';
-        std::cout << "mode_energy:"<<mode_energy<<'\n';
-        std::cout << "mode_flux:"<<mode_flux<<'\n';
-        std::cout << "beta:"<<beta<<'\n';
-        std::cout << "omega:" << omega<<'\n';
-        std::cout << omega*omega*epsilon_wg*mu_wg - beta*beta << '\n';
-        std::cout << beta*beta - omega*omega*epsilon_amb*mu_amb << '\n';
-    //*/
-    // end debug
-        double C_factor;
-        if(normalize)
+
+        std::complex<double> Ez, Hx_loc, Hy_loc;
+        // even mode or odd mode
+        // fundamental mode is 0
+        if(mode_index % 2)
         {
-            C_factor = 1/sqrt(mode_energy);
+            // odd mode
+            mode_energy = pow(sin(k*w/2), 2)*(epsilon_amb + beta_sq/(omega_sq*mu_amb))*exp(- kappa*w)/(4*kappa)
+                        + (epsilon_wg + beta_sq/(omega_sq*mu_wg))*(w - sin(k*w)/k)/8;
+            mode_flux = beta*pow(sin(k*w/2), 2)*exp(-kappa*w)/(2*kappa*omega*mu_amb)
+                        + beta*(w - sin(k*w)/k)/(4*omega*mu_wg);
+
+
+            double C_factor;
+
+            if(normalize)
+            {
+                C_factor = 1.0/sqrt(mode_energy);
+            }
+            else
+            {
+                double amplitude = port_other_params(0, curr_port);
+                C_factor = amplitude / sqrt(mode_flux);
+            }
+
+            // calculate the field
+            if(x < - w/2)
+            {
+                Ez = - C_factor * sin(k*w/2)*exp(kappa * x);
+                Hx_loc = std::complex<double>(1j)/(omega*mu_amb)* kappa * C_factor * sin(k*w/2)*exp(kappa * x);
+                Hy_loc = - beta/(omega * mu_amb) * Ez;
+            }
+            else if(x > w/2)
+            {
+                Ez = C_factor * sin(k*w/2) * exp(- kappa*x);
+                Hx_loc = std::complex<double>(1j)/(omega*mu_amb) * kappa * C_factor * sin(k*w/2) * exp(- kappa*x);
+                Hy_loc = - beta/(omega * mu_amb) * Ez;
+            }
+            else
+            {
+                Ez = C_factor * sin(k*x);
+                Hx_loc = - std::complex<double>(1j)/(omega*mu_wg) * C_factor * k * cos(k*x);
+                Hy_loc = - beta/(omega * mu_wg) * Ez;
+            }
+
         }
         else
         {
-            double amplitude = port_other_params(0, curr_port);
-            C_factor = amplitude / sqrt(mode_flux);
+            // even mode
+            mode_energy = pow(cos(k*w/2), 2)*(epsilon_amb + beta_sq/(omega_sq*mu_amb))*exp(-kappa*w)/(4*kappa)
+                            + (epsilon_wg + beta_sq/(omega_sq * mu_wg))*(w + sin(k*w)/k)/8;
+            mode_flux = beta*pow(cos(k*w/2),2) * exp(- kappa * w)/ (2 * kappa * omega * mu_amb)
+                            + beta * (w + sin(k*w)/k) / (4*omega*mu_wg);
+            /* debug
+            std::cout << "x = " << x <<'\n';
+            std::cout << "mode_energy:"<<mode_energy<<'\n';
+            std::cout << "mode_flux:"<<mode_flux<<'\n';
+            std::cout << "beta:"<<beta<<'\n';
+            std::cout << "omega:" << omega<<'\n';
+            std::cout << omega*omega*epsilon_wg*mu_wg - beta*beta << '\n';
+            std::cout << beta*beta - omega*omega*epsilon_amb*mu_amb << '\n';
+        //*/
+        // end debug
+            double C_factor;
+            if(normalize)
+            {
+                C_factor = 1/sqrt(mode_energy);
+            }
+            else
+            {
+                double amplitude = port_other_params(0, curr_port);
+                C_factor = amplitude / sqrt(mode_flux);
+            }
+
+            // calculate the field
+            if(x < - w/2)
+            {
+                Ez = C_factor * cos(k*w/2)*exp(kappa * x);
+                Hx_loc = - std::complex<double>(1j)/(omega*mu_amb)* kappa * C_factor * cos(k*w/2)*exp(kappa * x);
+                Hy_loc = - beta/(omega * mu_amb) * Ez;
+            }
+            else if(x > w/2)
+            {
+                Ez = C_factor * cos(k*w/2) * exp(- kappa*x);
+                Hx_loc = std::complex<double>(1j)/(omega*mu_amb)* kappa * C_factor * cos(k*w/2)*exp( - kappa * x);
+                Hy_loc = - beta/(omega * mu_amb) * Ez;
+            }
+            else
+            {
+                Ez = C_factor * cos(k*x);
+                Hx_loc = std::complex<double>(1j)/(omega*mu_wg) * C_factor * k* sin(k*x);
+                Hy_loc = - beta/(omega*mu_wg) * Ez;
+            }
         }
 
-        // calculate the field
-        if(x < - w/2)
+        double epsilon_loc, mu_loc;
+        if(x < -w/2 || x > w/2)
         {
-            value = C_factor * cos(k*w/2)*exp(kappa * x);
-        }
-        else if(x > w/2)
-        {
-            value = C_factor * cos(k*w/2) * exp(- kappa*x);
+            epsilon_loc = epsilon_amb;
+            mu_loc = mu_amb;
         }
         else
         {
-            value = C_factor * cos(k*x);
+            epsilon_loc = epsilon_wg;
+            mu_loc = mu_wg;
+        }
+
+        value = 1.0;
+        switch(which_field)
+        {
+        case WaveguideModes::Dz:
+            value *= epsilon_loc;
+        case WaveguideModes::Ez:
+            value *= Ez;
+            break;
+
+        case WaveguideModes::Bx:
+            value *= mu_loc;
+        case WaveguideModes::Hx:
+            value *= Hx_loc * x_axis(0) + Hy_loc * y_axis(0);
+            break;
+
+        case WaveguideModes::By:
+            value *= mu_loc;
+        case WaveguideModes::Hy:
+            value *= Hx_loc * x_axis(1) + Hy_loc * y_axis(1);
+            break;
         }
     }
 }

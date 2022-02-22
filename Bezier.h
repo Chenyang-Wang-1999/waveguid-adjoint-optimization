@@ -18,6 +18,10 @@ Eigen::MatrixXd Bezier_interp(const Eigen::MatrixXd &P, const Eigen::MatrixXd &V
 
 double Nearest_t(const Eigen::MatrixXd &P_ctrl, const Eigen::MatrixXd &V, Eigen::VectorXd pt, double AbsTol=1e-2);
 
+Eigen::MatrixXd Bezier_V_sensitivity(unsigned int id_P, unsigned int id_dim,
+        const Eigen::MatrixXd &P, unsigned int start_point_mode, unsigned int end_point_mode,
+        Eigen::VectorXd vec_start, Eigen::VectorXd vec_end, bool autoscale);
+
 #ifdef EXPORT_PYLIB
 PYBIND11_MODULE(Bezier, m) {
 

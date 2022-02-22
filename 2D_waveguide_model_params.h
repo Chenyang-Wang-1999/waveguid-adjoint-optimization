@@ -5,6 +5,12 @@
 #ifndef Two_D_WAVEGUIDE_MODEL_PARAMS_H_INCLUDED
 #define Two_D_WAVEGUIDE_MODEL_PARAMS_H_INCLUDED
 
+namespace WaveguideModes
+{
+    typedef enum {Ex, Ey, Ez, Hx, Hy, Hz, Dx, Dy, Dz, Bx, By, Bz} FieldComp;
+}
+
+
 class WaveguideParams
 {
 public:
@@ -19,7 +25,7 @@ public:
     Eigen::RowVectorXi port_analytic; // whether use analytic expressions
     Eigen::RowVectorXi port_incidence_on; // whether the port incidence is on
     Eigen::MatrixXd port_other_params; //other parameters of the port, (amplitude, width, mode_index, beta, epsilon_wg, epsilon_amb, mu_wg, mu_amb)
-    void analytic_E_field(Eigen::Vector3d pt, int curr_port, double omega, std::complex<double>& value, bool normalize=true);
+    void analytic_E_field(Eigen::Vector3d pt, int curr_port, double omega, std::complex<double>& value, bool normalize=true, WaveguideModes::FieldComp which_field=WaveguideModes::Ez);
 };
 
 #endif // Two_D_WAVEGUIDE_MODEL_PARAMS_H_INCLUDED
