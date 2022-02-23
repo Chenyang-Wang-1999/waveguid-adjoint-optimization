@@ -6,8 +6,9 @@
 
 /*
 #define DEBUG
-#define WEXTRAP
+
 //*/
+// #define WEXTRAP
 
 Eigen::MatrixXd Bezier_tangent_vector(const Eigen::MatrixXd &P, unsigned int start_point_mode, unsigned int end_point_mode,
         Eigen::VectorXd vec_start, Eigen::VectorXd vec_end, bool autoscale)
@@ -133,7 +134,7 @@ Eigen::MatrixXd Bezier_interp(const Eigen::MatrixXd &P, const Eigen::MatrixXd &V
         if(-1e-6 < loc_t && loc_t< 1e-6)
         {
             // std::cout << "Is control point\n";
-            id = (int)t(i) + 0.5;
+            id = (int)(t(i) + 0.5);
             if(diff_order == 0)
             {
                 B.row(i) = P.row(id);
@@ -237,7 +238,7 @@ Eigen::MatrixXd Bezier_V_sensitivity(unsigned int id_P, unsigned int id_dim,
         }
     }
 
-    return Bezier_tangent_vector(P_sens, start_point_mode, end_point_mode, vec_start, vec_end, autoscale);
+    return Bezier_tangent_vector(P_sens, start_point_mode, end_point_mode, vec_start, vec_end, false);
 }
 
 double Nearest_t(const Eigen::MatrixXd &P_ctrl, const Eigen::MatrixXd &V, Eigen::VectorXd pt, double AbsTol)

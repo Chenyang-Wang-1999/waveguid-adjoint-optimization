@@ -14,12 +14,17 @@
 #include <libmesh/dense_matrix.h>
 #include <libmesh/dense_vector.h>
 #include <libmesh/enum_solver_package.h>
+#include <libmesh/linear_solver.h>
+#include <libmesh/petsc_linear_solver.h>
 
 // libmesh fem
 #include <libmesh/fe.h>
 #include <libmesh/parameters.h>
 #include <libmesh/fem_context.h>
 #include <libmesh/dof_map.h>
+
+// libmesh adjoint
+#include <libmesh/qoi_set.h>
 
 // quadrature
 #include <libmesh/quadrature_gauss.h>
@@ -42,7 +47,7 @@
     #define WEXTRAP
 #endif // DEBUG
 
-#define DEBUG_ASSEMBLE_DKDP
+// #define DEBUG_ASSEMBLE_DKDP
 
 // My functions
 #include "EM_mesh_flagging.h"
@@ -70,11 +75,12 @@ Number mode_decompose(Parameters & params, FEMContext & context );
 void get_data_vec(System &sys, Eigen::VectorXcd *sol, int varid);
 void assemble_waveguide(EquationSystems & es,
                       const std::string & libmesh_dbg_var(system_name));
-void assemble_QOI_rhs(System & system, const Parameters & params);
 
 void assemble_sensitivity_K(System & system, Parameters & params,
         SparseMatrix<Number> & dKdp, unsigned int point_id, unsigned int dim_id,
         boundary_id_type boundary_id, const Eigen::MatrixXd & Bezier_p, const Eigen::MatrixXd & Bezier_v);
+void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name, const QoISet &, bool , bool );
+void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name);
 
 int main(int argc, char ** argv)
 {
@@ -104,7 +110,7 @@ int main(int argc, char ** argv)
     unsigned int save_field = infile("save_field",0);
     std::string result_mat_name = infile("result_mat_name",std::string());
     subdomain_id_type id_wg = mesh.get_id_by_name("waveguide");
-    subdomain_id_type id_input = mesh_bd.get_id_by_name("input");
+    // subdomain_id_type id_input = mesh_bd.get_id_by_name("input");
 
     // subdomain_id_type id_output1 = mesh_bd.get_id_by_name("output1");
     // subdomain_id_type id_output21 = mesh_bd.get_id_by_name("output21");
@@ -148,7 +154,8 @@ int main(int argc, char ** argv)
 #endif // NO_MESH_REFINEMENT
 
     mesh.add_node_datum<double>("Bezier_t");
-
+    mesh.add_node_datum<bool>("x_positive");
+    mesh.add_node_datum<bool>("y_positive");
 
     mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
 
@@ -178,7 +185,7 @@ int main(int argc, char ** argv)
     FEMContext context(eq_systems.get_system("waveguide"),{Ez_id});
 
     eq_systems.init();
-    eq_systems.print_info();
+    // eq_systems.print_info();
 
     // solve
     eq_systems.get_system("waveguide").solve();
@@ -196,26 +203,35 @@ int main(int argc, char ** argv)
     integrate_along_side(eq_systems, selected_domains, S_params, mode_decompose);
 
     // Solve adjoint problem
+
     unsigned int selected_port = 1; // output 1
     eq_systems.parameters.set<Complex>("curr_S") = S_params(selected_port);
     eq_systems.parameters.set<subdomain_id_type>("QOI_port") = selected_port;
-    assemble_QOI_rhs(eq_systems.get_system("waveguide"), eq_systems.parameters);
-    eq_systems.get_system("waveguide").assemble_before_solve = false;
-    eq_systems.get_system("waveguide").adjoint_solve();
+    LinearImplicitSystem & curr_system = eq_systems.get_system<LinearImplicitSystem>("waveguide");
+    // eq_systems.get_system("waveguide").attach_QOI_derivative(assemble_QOI_rhs);
+    // eq_systems.get_system("waveguide").assemble_before_solve = false;
+    // eq_systems.get_system("waveguide").adjoint_solve();
+    assemble_QOI_rhs(eq_systems, "waveguide");
+    LinearSolver<Number> * solver = curr_system.get_linear_solver();
+    std::pair<unsigned int, Real> solver_params =
+        curr_system.get_linear_solve_parameters();
+    solver ->adjoint_solve(curr_system.get_system_matrix(), curr_system.add_adjoint_solution(0), curr_system.get_adjoint_rhs(0),
+                            solver_params.second, solver_params.first);
 
+    MPI_Barrier(MPI_COMM_WORLD);
     // Get all sensitivity
     Eigen::MatrixXd ex_opt_sens(ex_Bezier_P.rows(), ex_Bezier_P.cols());
     Eigen::MatrixXd in_opt_sens(in_Bezier_P.rows(), in_Bezier_P.cols());
 
 
     // std::unique_ptr< NumericVector< Number > > adjoint_copy = eq_systems.get_system("waveguide").get_adjoint_solution(0).clone();
-    System & curr_system = eq_systems.get_system("waveguide");
+
     curr_system.add_vector("middle_vec");
     curr_system.add_matrix("dKdp");
+    curr_system.add_vector("middle_vec2");
+    curr_system.add_matrix("dKdp2");
+
     NumericVector<Number> & middle_vec = curr_system.get_vector("middle_vec");
-
-    std::cout << curr_system.get_vector("middle_vec").initialized();
-
     for(unsigned int dim_id = 0; dim_id < ex_Bezier_P.cols(); dim_id++)
     {
         for(unsigned int point_id = 0; point_id < ex_Bezier_P.rows(); point_id++)
@@ -223,39 +239,36 @@ int main(int argc, char ** argv)
             // SparseMatrix<Number> dKdp(init.comm());
             // NumericVector<Number> middle_vec(init.comm());
 
-            curr_system.get_vector("middle_vec").zero();
+            middle_vec.zero();
             curr_system.get_matrix("dKdp").zero();
-            //assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
-            //        id_ex_opt, ex_Bezier_P, ex_Bezier_V);
-            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), * eq_systems.get_system("waveguide").solution);
-
-            //ex_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
+            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
+                    id_ex_opt, ex_Bezier_P, ex_Bezier_V);
+            curr_system.get_matrix("dKdp").vector_mult(middle_vec, * eq_systems.get_system("waveguide").solution);
+            middle_vec.conjugate();
+            // std::cout << curr_system.n_qois() <<'\n';
+            ex_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
+        #ifdef DEBUG_ASSEMBLE_DKDP
+            std::cout << ex_opt_sens(point_id, dim_id);
+        #endif // DEBUG_ASSEMBLE_DKDP
         }
     }
 
-    return 0;
+    middle_vec = curr_system.get_vector("middle_vec2");
     for(unsigned int dim_id = 0; dim_id < in_Bezier_P.cols(); dim_id++)
     {
         for(unsigned int point_id = 0; point_id < in_Bezier_P.rows(); point_id++)
         {
-            curr_system.get_vector("middle_vec").zero();
-            curr_system.get_matrix("dKdp").zero();
-            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
+            middle_vec.zero();
+            curr_system.get_matrix("dKdp2").zero();
+            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp2"), point_id, dim_id,
                     id_in_opt, in_Bezier_P, in_Bezier_V);
-            curr_system.get_matrix("dKdp").vector_mult(curr_system.get_vector("middle_vec"), *  eq_systems.get_system("waveguide").solution);
-
+            curr_system.get_matrix("dKdp2").vector_mult(middle_vec, *  eq_systems.get_system("waveguide").solution);
+            middle_vec.conjugate();
             in_opt_sens(point_id, dim_id) = std::real(eq_systems.get_system("waveguide").get_adjoint_solution(0).dot(middle_vec));
         }
     }
 
-    /*
-     *
-    std::vector<Complex> sol_vec;
-    eq_systems.build_solution_vector(sol_vec);
-    std::cout<<sol_vec.size()<<'\n';
-    //*
-    Eigen::Map<Eigen::VectorXcd> sol_VectorXcd(sol_vec.data(),sol_vec.size());
-    //*/
+
     processor_id_type curr_id = mesh.processor_id();
 
     static Eigen::VectorXcd sol(eq_systems.get_system("waveguide").n_dofs());
@@ -324,6 +337,8 @@ void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, M
 
             // append t
             node->set_extra_datum(0, t);
+            node->set_extra_datum(1, x_posi);
+            node->set_extra_datum(2, y_posi);
             Eigen::VectorXd t_vec(1);
             t_vec(0) = t;
             Eigen::MatrixXd curr_pt;
@@ -334,6 +349,7 @@ void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, M
             (*node)(0) = x_posi?curr_pt(0,0):-curr_pt(0,0);
             (*node)(1) = y_posi?curr_pt(0,1):-curr_pt(0,1);
         }
+
     }
 }
 
@@ -360,7 +376,7 @@ void integrate_along_side(
   //const BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
 
   // The dimension that we are running
-  const unsigned int dim = mesh.mesh_dimension();
+  // const unsigned int dim = mesh.mesh_dimension();
 
   // initialize the solution vector
   integration_value.resize(selected_domain.size());
@@ -432,7 +448,7 @@ Number N_poav_integrand( Parameters& params,
     // The XYZ locations (in physical space) of the
     // quadrature points on the face.  This is where
     // we will interpolate the boundary value function.
-    const std::vector<Point> & q_point = fe_face->get_xyz();
+    // const std::vector<Point> & q_point = fe_face->get_xyz();
     const std::vector<Real> & JxW = fe_face -> get_JxW();
     const std::vector<Point> & normal = fe_face -> get_normals();
 
@@ -508,7 +524,7 @@ Number mode_decompose(Parameters & params, FEMContext & context )
     // we will interpolate the boundary value function.
     const std::vector<Point> & q_point = fe_face->get_xyz();
     const std::vector<Real> & JxW = fe_face -> get_JxW();
-    const std::vector<Point> & normal = fe_face -> get_normals();
+    // const std::vector<Point> & normal = fe_face -> get_normals();
 
     // Compute the shape function values on the element
     // face.
@@ -556,7 +572,7 @@ void get_data_vec(System &sys, Eigen::VectorXcd *sol, int varid)
     // get data vector by FEM context
     const MeshBase & mesh = sys.get_mesh();
     const DofMap & dof_map = sys.get_dof_map();
-    const BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
+    // const BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
     NumericVector<Number> & sys_sol = *sys.solution;
     sol->setZero();
 
@@ -666,7 +682,7 @@ void assemble_waveguide(EquationSystems & es,
   // The physical XY locations of the quadrature points on the element.
   // These might be useful for evaluating spatially varying material
   // properties at the quadrature points.
-  const std::vector<Point> & q_point = fe->get_xyz();
+  // const std::vector<Point> & q_point = fe->get_xyz();
 
   // The element shape functions evaluated at the quadrature points.
   const std::vector<std::vector<Real>> & phi = fe->get_phi();
@@ -936,17 +952,21 @@ void assemble_waveguide(EquationSystems & es,
   // All done!
 }
 
-void assemble_QOI_rhs(System & system, const Parameters & params)
+void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name)
 {
+    System & system = es.get_system(sys_name);
+    Parameters & params = es.parameters;
     NumericVector<Number> * adjoint_rhs;
     if(system.n_qois())
     {
         // qoi has been defined
         adjoint_rhs = &system.get_adjoint_rhs(0);
+        adjoint_rhs->zero();
     }
     else
     {
         adjoint_rhs = &system.add_adjoint_rhs(0);
+        adjoint_rhs->zero();
     }
 
     // get parameters
@@ -1021,7 +1041,7 @@ void assemble_QOI_rhs(System & system, const Parameters & params)
                                     std::conj(mode_Hx)*dBxdA +
                                     std::conj(mode_Hy)*dBydA
                                     )/4;
-                        Fe(i) += 2*std::real(std::conj(S)*dSdA) + 2*Complex(1j)*std::imag(std::conj(S)*dSdA);
+                        Fe(i) += (2*std::real(std::conj(S)*dSdA) + 2*Complex(1j)*std::imag(std::conj(S)*dSdA))*JxW_face[qp];
                     }
                 }
 
@@ -1050,6 +1070,7 @@ void assemble_sensitivity_K(System & system, Parameters & params,
 {
     Eigen::MatrixXd Sens_v = Bezier_V_sensitivity(point_id, dim_id, Bezier_p, 0, 1, Bezier_v.row(0), Bezier_v.row(0), true);
     Eigen::MatrixXd Sens_p(Bezier_p.rows(), Bezier_p.cols());
+    dKdp.zero();
     Sens_p.setZero();
     Sens_p(point_id, dim_id) = 1;
 
@@ -1082,7 +1103,6 @@ void assemble_sensitivity_K(System & system, Parameters & params,
     DenseMatrix<Number> Ke;
     std::vector<dof_id_type> dof_indices;
 
-    #ifndef DEBUG_ASSEMBLE_DKDP
 
     for(Elem* elem: mesh.active_local_element_ptr_range())
     {
@@ -1100,28 +1120,72 @@ void assemble_sensitivity_K(System & system, Parameters & params,
                     // reinitialize and get fe data
                     fe_face->reinit(elem, side);
                     const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
-                    const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
-                    const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
+                    // const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
+                    // const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
                     const std::vector<Point> & normal_face = fe_face->get_normals();
                     const std::vector<Real> & JxW_face = fe_face->get_JxW();
-                    const std::vector<Point> & qface_point = fe_face->get_xyz();
+                    // const std::vector<Point> & qface_point = fe_face->get_xyz();
+
+                    std::unique_ptr<Elem> side_elem = elem->side_ptr(side);
 
                     // Bezier interpolation
-                    Eigen::VectorXd t_list(n_dofs);
-                    for(unsigned int i = 0; i < n_dofs; i++)
+                    Eigen::VectorXd t_list(side_elem->n_nodes());
+
+                    for(unsigned int i = 0; i < side_elem->n_nodes(); i++)
                     {
-                        t_list(i) = elem->node_ptr(i) ->get_extra_datum<double>(0);
+                        t_list(i) = side_elem->node_ptr(i) ->get_extra_datum<double>(0);
                     }
 
-                    Eigen::MatrixXd P_sens = Bezier_interp(Sens_p, Sens_v, t_list, 0);
-                    Eigen::MatrixXd V_tan = Bezier_interp(Bezier_p, Bezier_v, t_list, 1);
+		#ifdef DEBUG_ASSEMBLE_DKDP
+		    std::cout << "t_list\n"<<t_list << '\n';
+		    std::cout << "Sens_p\n"<<Sens_p << '\n';
+		    std::cout << "Sens_v\n"<<Sens_v << '\n';
+		    std::cout << "Bezier_p\n"<<Bezier_p << '\n';
+		    std::cout << "Bezier_v\n"<<Bezier_v << '\n';
+		#endif
+
+                    Eigen::MatrixXd P_sens(side_elem->n_nodes(), Bezier_p.cols()), V_tan(side_elem->n_nodes(), Bezier_p.cols());
+                    P_sens = Bezier_interp(Sens_p, Sens_v, t_list, 0);
+                    V_tan = Bezier_interp(Bezier_p, Bezier_v, t_list, 1);
+                #ifndef DEBUG_ASSEMBLE_DKDP
+                    Eigen::RowVectorXd average_P_sens(P_sens.cols()), average_V_tan(V_tan.cols());
+                    average_V_tan.setZero();
+                    average_P_sens.setZero();
 
                     // normalize
-                    for(unsigned int i = 0; i<n_dofs; i++)
+                    for(unsigned int i=0; i<side_elem->n_nodes();i++)
                     {
-                        double norm_tangent = V_tan.row(i).norm();
-                        V_tan.row(i) /= norm_tangent;
+                        bool x_posi = side_elem->node_ptr(i) ->get_extra_datum<bool>(1);
+                        bool y_posi = side_elem->node_ptr(i) ->get_extra_datum<bool>(2);
+
+                        if(! x_posi)
+                        {
+                            P_sens(i, 0) *= -1;
+                            V_tan(i, 0) *= -1;
+                        }
+                        if(! y_posi)
+                        {
+                            P_sens(i, 1) *= -1;
+                            V_tan(i, 1) *= -1;
+                        }
+
+                        average_P_sens += P_sens.row(i);
+                        average_V_tan += V_tan.row(i);
                     }
+
+                    double V_tan_norm = average_V_tan.norm();
+                    average_V_tan /= V_tan_norm;
+
+                    average_P_sens /= side_elem->n_nodes();
+
+
+                    Point average_normal_vec(0,0,0);
+                    for(unsigned int i = 0; i<normal_face.size(); i++)
+                    {
+                        average_normal_vec += normal_face[i];
+                    }
+                    average_normal_vec /= normal_face.size();
+                    average_normal_vec /= average_normal_vec.norm();
 
                     // assemble matrix
                     /* For FEM
@@ -1132,14 +1196,23 @@ void assemble_sensitivity_K(System & system, Parameters & params,
                             where \Delta FEM_beta = {FEM_beta_wg - FEM_beta_amb  ,normalxtangent > 0 (+ indicates enlarging the waveguide)
                                                     {- ...
                     */
+                    if(boundary_id == 7 && side_elem->node_ptr(0) ->get_extra_datum<bool>(1) && side_elem->node_ptr(0) ->get_extra_datum<bool>(2))
+                    {
+                        std::cout << "Normal: "<< average_normal_vec(0) << ',' << average_normal_vec(1) << '\n';
+                    }
+
+                    bool positive_area =( (average_normal_vec(0)*average_V_tan(1) - average_normal_vec(1) * average_V_tan(0))>0);
+                    double volume_elem = average_P_sens(0) * average_V_tan(1) - average_P_sens(1)*average_V_tan(0);     // P_sens(i) x V_tan(i)
+                    double curr_FEM_beta = positive_area? Delta_FEM_beta: - Delta_FEM_beta;
+
+                    //double volume_elem = average_P_sens(0)*average_normal_vec(0) + average_P_sens(1) + average_normal_vec(1);
+                    //double curr_FEM_beta = Delta_FEM_beta;
 
                     for(unsigned int i = 0; i<n_dofs; i++)
                     {
                         for(unsigned int qp = 0; qp < JxW_face.size(); qp++)
                         {
-                            bool enlarge = (normal_face[i](0)*V_tan(i,1) - normal_face[i](1)*V_tan(i, 0)>0); // normal(i) x  V_tan(i)
-                            double volume_elem = P_sens(i, 0) * V_tan(i, 1) - P_sens(i, 1)*V_tan(i, 0);     // P_sens(i) x V_tan(i)
-                            double curr_FEM_beta = enlarge? Delta_FEM_beta: - Delta_FEM_beta;
+
                             for(unsigned int j = 0; j < n_dofs; j++)
                             {
                                 Ke(i,j) += curr_FEM_beta * (phi_face[i][qp]*phi_face[j][qp]) * volume_elem * JxW_face[qp];
@@ -1147,14 +1220,12 @@ void assemble_sensitivity_K(System & system, Parameters & params,
                             }
                         }
                     }// for(i:dofs)
-
                     dKdp.add_matrix(Ke, dof_indices);
-
+                #endif // DEBUG_ASSEMBLE_DKDP
                 }
             }
         }
     }
-#endif // DEBUG_ASSEMBLE_DKDP
 
 
 }
