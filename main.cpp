@@ -41,11 +41,9 @@
 #include <mpi.h>
 
 // Debug mode
-#define NO_MESH_REFINEMENT
+//#define NO_MESH_REFINEMENT
 // #define DEBUG
-#ifdef DEBUG
-    #define WEXTRAP
-#endif // DEBUG
+
 
 // #define DEBUG_ASSEMBLE_DKDP
 
@@ -78,6 +76,7 @@ void assemble_waveguide(EquationSystems & es,
 
 void assemble_sensitivity_K(System & system, Parameters & params,
         SparseMatrix<Number> & dKdp, unsigned int point_id, unsigned int dim_id,
+        unsigned int start_point_mode, unsigned int end_point_mode,
         boundary_id_type boundary_id, const Eigen::MatrixXd & Bezier_p, const Eigen::MatrixXd & Bezier_v);
 void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name, const QoISet &, bool , bool );
 void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name);
@@ -102,6 +101,8 @@ int main(int argc, char ** argv)
     MeshRefinement my_refinement(mesh);
 
     // set flagging
+    unsigned int start_point_mode = infile("start_point_mode",0);
+    unsigned int end_point_mode = infile("end_point_mode",1);
     double epsilon_wg = infile("epsilon_wg", 13.0);
     double epsilon_air = infile("epsilon_amb",1.0);
     double mu_wg = infile("mu_wg", 1.0);
@@ -220,8 +221,22 @@ int main(int argc, char ** argv)
 
     MPI_Barrier(MPI_COMM_WORLD);
     // Get all sensitivity
-    Eigen::MatrixXd ex_opt_sens(ex_Bezier_P.rows(), ex_Bezier_P.cols());
-    Eigen::MatrixXd in_opt_sens(in_Bezier_P.rows(), in_Bezier_P.cols());
+    unsigned int ex_points, in_points;
+
+    std::cout << "end point mode:"<<end_point_mode<<'\n';
+    if(end_point_mode == 0 || start_point_mode == 0)
+    {
+        ex_points = ex_Bezier_P.rows() + 1;
+        in_points = in_Bezier_P.rows() + 1;
+    }
+    else
+    {
+        ex_points = ex_Bezier_P.rows();
+        in_points = in_Bezier_P.rows();
+    }
+
+    Eigen::MatrixXd ex_opt_sens(ex_points, ex_Bezier_P.cols());
+    Eigen::MatrixXd in_opt_sens(in_points, in_Bezier_P.cols());
 
 
     // std::unique_ptr< NumericVector< Number > > adjoint_copy = eq_systems.get_system("waveguide").get_adjoint_solution(0).clone();
@@ -234,7 +249,7 @@ int main(int argc, char ** argv)
     NumericVector<Number> & middle_vec = curr_system.get_vector("middle_vec");
     for(unsigned int dim_id = 0; dim_id < ex_Bezier_P.cols(); dim_id++)
     {
-        for(unsigned int point_id = 0; point_id < ex_Bezier_P.rows(); point_id++)
+        for(unsigned int point_id = 0; point_id < ex_points; point_id++)
         {
             // SparseMatrix<Number> dKdp(init.comm());
             // NumericVector<Number> middle_vec(init.comm());
@@ -242,6 +257,7 @@ int main(int argc, char ** argv)
             middle_vec.zero();
             curr_system.get_matrix("dKdp").zero();
             assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp"), point_id, dim_id,
+                    start_point_mode, end_point_mode,
                     id_ex_opt, ex_Bezier_P, ex_Bezier_V);
             curr_system.get_matrix("dKdp").vector_mult(middle_vec, * eq_systems.get_system("waveguide").solution);
             middle_vec.conjugate();
@@ -256,11 +272,11 @@ int main(int argc, char ** argv)
     middle_vec = curr_system.get_vector("middle_vec2");
     for(unsigned int dim_id = 0; dim_id < in_Bezier_P.cols(); dim_id++)
     {
-        for(unsigned int point_id = 0; point_id < in_Bezier_P.rows(); point_id++)
+        for(unsigned int point_id = 0; point_id < in_points; point_id++)
         {
             middle_vec.zero();
             curr_system.get_matrix("dKdp2").zero();
-            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp2"), point_id, dim_id,
+            assemble_sensitivity_K(eq_systems.get_system("waveguide"), eq_systems.parameters, curr_system.get_matrix("dKdp2"), point_id, dim_id, start_point_mode,end_point_mode,
                     id_in_opt, in_Bezier_P, in_Bezier_V);
             curr_system.get_matrix("dKdp2").vector_mult(middle_vec, *  eq_systems.get_system("waveguide").solution);
             middle_vec.conjugate();
@@ -1066,13 +1082,19 @@ void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name)
 
 void assemble_sensitivity_K(System & system, Parameters & params,
         SparseMatrix<Number> & dKdp, unsigned int point_id, unsigned int dim_id,
+        unsigned int start_point_mode, unsigned int end_point_mode,
         boundary_id_type boundary_id, const Eigen::MatrixXd & Bezier_p, const Eigen::MatrixXd & Bezier_v)
 {
-    Eigen::MatrixXd Sens_v = Bezier_V_sensitivity(point_id, dim_id, Bezier_p, 0, 1, Bezier_v.row(0), Bezier_v.row(0), true);
+    unsigned int N_points = Bezier_p.rows();
+    Eigen::MatrixXd Sens_v = Bezier_V_sensitivity(point_id, dim_id, Bezier_p,
+            start_point_mode, end_point_mode, Bezier_v.row(0), Bezier_v.row(N_points - 1), true);
     Eigen::MatrixXd Sens_p(Bezier_p.rows(), Bezier_p.cols());
     dKdp.zero();
     Sens_p.setZero();
-    Sens_p(point_id, dim_id) = 1;
+    if(point_id < Bezier_p.rows())
+    {
+        Sens_p(point_id, dim_id) = 1;
+    }
 
     // loop around the geometry, and integrate around the boundary
     // get parameters
@@ -1196,10 +1218,6 @@ void assemble_sensitivity_K(System & system, Parameters & params,
                             where \Delta FEM_beta = {FEM_beta_wg - FEM_beta_amb  ,normalxtangent > 0 (+ indicates enlarging the waveguide)
                                                     {- ...
                     */
-                    if(boundary_id == 7 && side_elem->node_ptr(0) ->get_extra_datum<bool>(1) && side_elem->node_ptr(0) ->get_extra_datum<bool>(2))
-                    {
-                        std::cout << "Normal: "<< average_normal_vec(0) << ',' << average_normal_vec(1) << '\n';
-                    }
 
                     bool positive_area =( (average_normal_vec(0)*average_V_tan(1) - average_normal_vec(1) * average_V_tan(0))>0);
                     double volume_elem = average_P_sens(0) * average_V_tan(1) - average_P_sens(1)*average_V_tan(0);     // P_sens(i) x V_tan(i)

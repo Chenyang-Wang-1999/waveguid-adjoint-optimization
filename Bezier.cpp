@@ -201,7 +201,10 @@ Eigen::MatrixXd Bezier_V_sensitivity(unsigned int id_P, unsigned int id_dim,
     // Point sensitivity
     Eigen::MatrixXd P_sens(N_points, dim);
     P_sens.setZero();
-    P_sens(id_P, id_dim) = 1;
+    if(id_P < N_points)
+    {
+        P_sens(id_P, id_dim) = 1;
+    }
 
     // start and end vectors
     if(start_point_mode == 0)
@@ -213,6 +216,24 @@ Eigen::MatrixXd Bezier_V_sensitivity(unsigned int id_P, unsigned int id_dim,
                 double vec_norm = vec_start.norm();
                 double tan_vec_norm = (P.row(1) - P.row(0)).norm();
                 vec_start *= ( P(id_P,id_dim) - P((id_P+1)%2, id_dim) )/vec_norm/tan_vec_norm;
+            }
+        }
+        else if(id_P == N_points && id_dim == 0)
+        {
+
+            if(autoscale)
+            {
+                double vec_norm = vec_start.norm();
+                Eigen::VectorXd unit_vec_start = vec_start / vec_norm;
+                double tan_vec_norm = (P.row(1) - P.row(0)).norm();
+                vec_start(0) = - unit_vec_start(1) * tan_vec_norm;
+                vec_start(1) = unit_vec_start(0) * tan_vec_norm;
+            }
+            else
+            {
+                Eigen::VectorXd vec_temp = vec_start;
+                vec_start(0) = -vec_temp(1);
+                vec_start(1) = vec_temp(0);
             }
         }
         else
@@ -230,6 +251,23 @@ Eigen::MatrixXd Bezier_V_sensitivity(unsigned int id_P, unsigned int id_dim,
                 double vec_norm = vec_end.norm();
                 double tan_vec_norm = (P.row(N_points - 1) - P.row(N_points - 2)).norm();
                 vec_end *= ( P(id_P,id_dim) - P((id_P+3-N_points)%2 + N_points - 2, id_dim) )/vec_norm/tan_vec_norm;
+            }
+        }
+        else if(id_P == N_points && id_dim == 1)
+        {
+            if(autoscale)
+            {
+                double vec_norm = vec_end.norm();
+                Eigen::VectorXd unit_vec_end = vec_end/ vec_norm;
+                double tan_vec_norm = (P.row(N_points - 1) - P.row(N_points - 2)).norm();
+                vec_end(0) = - unit_vec_end(1) * tan_vec_norm;
+                vec_end(1) = unit_vec_end(0) * tan_vec_norm;
+            }
+            else
+            {
+                Eigen::VectorXd vec_temp = vec_end;
+                vec_end(0) = -vec_temp(1);
+                vec_end(1) = vec_temp(0);
             }
         }
         else

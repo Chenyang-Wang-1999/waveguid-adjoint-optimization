@@ -99,7 +99,7 @@ void EMMeshFlagging::flag_elements()
 
         // get wavelength
         double curr_wl = 1/freq/index;
-        max_elem_vol = pow(curr_wl/8, dim);
+        max_elem_vol = pow(curr_wl/16, dim);
         /* debug
         std::cout << "Current index: "<< index <<'\n';
         std::cout << "Element volume: " << elem->volume() <<'\n';

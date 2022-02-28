@@ -28,6 +28,7 @@ PYBIND11_MODULE(Bezier, m) {
     m.def("Bezier_tangent_vector", &Bezier_tangent_vector);
     m.def("Bezier_interp", &Bezier_interp);
     m.def("Nearest_t", &Nearest_t);
+    m.def("Bezier_V_sensitivity", &Bezier_V_sensitivity);
 }
 #endif // EXPORT_PYLIB
 
