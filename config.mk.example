@@ -1,0 +1,12 @@
+# 本机特有的构建配置。复制成 config.mk 后按需修改；config.mk 已被 .gitignore 忽略。
+#
+#   cp config.mk.example config.mk
+
+# libMesh 安装前缀（里面应有 bin/libmesh-config）
+LIBMESH_DIR ?= $(HOME)/local
+
+# libMesh 编译模式：opt / dbg / devel
+METHOD ?= opt
+
+# 编译 Python 扩展模块时用的解释器
+PYTHON ?= python3

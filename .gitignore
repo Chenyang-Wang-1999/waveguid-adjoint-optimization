@@ -1,0 +1,45 @@
+# ---- 编译产物 ----------------------------------------------------------
+*.o
+*.d
+*.so
+*.a
+*.la
+*.lo
+waveguide_optimization/waveguide_optimization
+waveguide_optimization/waveguide_optimization.exe
+
+# ---- 本机配置（不要提交，见 config.mk.example）------------------------
+config.mk
+
+# ---- 运行产物 ----------------------------------------------------------
+data/out_*.msh
+data/*_result.mat
+data/*_list.csv
+data/*.log
+output/
+
+# ---- Python ------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# ---- 大体积中间数据（保留在本地即可）----------------------------------
+remote_*.msh
+remote_*.mat
+out_*.msh
+
+# ---- 文档编译产物 ------------------------------------------------------
+docs/build/
+
+# ---- 编辑器 / 系统 -----------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ---- 整理期间的临时目录 ------------------------------------------------
+.docwork/

@@ -1,0 +1,8 @@
+# C++ 侧的 Bezier 扩展模块需要 pybind11；其余是网格生成与优化循环要用的
+numpy>=1.20
+scipy>=1.6
+matplotlib>=3.4
+gmsh>=4.8
+pygmsh>=7.0
+pyvista>=0.32
+pybind11>=2.6
