@@ -8,8 +8,13 @@ from paths import chdir_data, run_solver
 
 chdir_data()
 
+# params = (freq, w_wg, L_sim, L_fixed, epsilon, mu)；这里只用得到 freq，
+# 其余保持 cross_waveguide() 的默认值（与 optimize.py 里的调用形式一致）。
+SENS_PARAMS = (0.1, 1, 10, 3, 13, 1)
+
+
 def get_dof_derivative(DOFs, params:tuple):
-    freq, w_wg, L_sim, L_fixed, epsilon, mu= params
+    freq, w_wg, L_sim, L_fixed, epsilon, mu = params
     os.system("rm *result.mat")
     cross_waveguide(DOFs, freq=freq)
     run_solver()
@@ -33,14 +38,14 @@ def test_sensitivity():
 
     all_DOFS.append(DOFs.flatten())
     
-    Sens, S_params = get_dof_derivative(DOFs, (0.1,))
+    Sens, S_params = get_dof_derivative(DOFs, SENS_PARAMS)
 
     all_S_params.append(S_params.flatten())
     all_sens.append(Sens.flatten())
     
     DOFs += np.random.rand(DOFs.shape[0]) * 0.01
     all_DOFS.append(DOFs.flatten())
-    Sens, S_params = get_dof_derivative(DOFs, (0.1,))
+    Sens, S_params = get_dof_derivative(DOFs, SENS_PARAMS)
     all_S_params.append(S_params.flatten())
     all_sens.append(Sens.flatten())
 

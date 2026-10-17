@@ -137,8 +137,12 @@ $ (diff W)/(diff p) = - Re( overline(bold(a))^T (diff bold(K))/(diff p) bold(a) 
 | `docs/results/` | 交叉波导优化的结果，以及微环阵列的能带与边缘态 |
 
 ```bash
+# 需要先装 typst（https://typst.app/，或 cargo install typst-cli）
 make docs          # 或 ./docs/build.sh，产物在 docs/build/
 ```
+
+文档分三层：`overview.typ` 与 `build-and-run.typ` 讲项目与用法，`theory/` 讲物理与数值方法，
+`results/` 放结果。每篇技术文档里的 `代码对应` 块会把它和具体函数挂钩。
 
 ## 参考文献
 

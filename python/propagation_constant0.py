@@ -5,7 +5,7 @@ from math import sin, cos, sqrt, pi
 
 def cost_function_2(beta:float,
 h:float, n0:float, n1:float, k0:float):
-    # cost function f(beta) = kappa1*h - arctan(p0/kappa1)
+    # cost function g(beta) = kappa1*h/2 - arctan(p0/kappa1)
     kappa1 = np.sqrt((k0**2) * (n1**2) - beta**2)
     p0 = np.sqrt(beta**2 - (k0**2)*(n0**2))
     return (kappa1*h/2 - np.arctan(p0/kappa1))

@@ -19,6 +19,8 @@ LIBMESH_DIR  ?= $(HOME)/local
 LIBMESH_CONFIG := $(LIBMESH_DIR)/bin/libmesh-config
 
 # libMesh 编译模式：opt / dbg / devel（取决于 libMesh 编译时的 configure 选项）
+# 注意：libmesh-config 是从*环境变量*里读 METHOD 的，而 make 的 $(shell ...) 不会把
+# makefile 变量（哪怕 export 过）传进去，所以下面每次调用都显式写成 METHOD=$(METHOD)。
 METHOD ?= opt
 
 # Python 解释器（编译 Bezier 扩展模块时用；带 pybind11 的那个）
@@ -34,9 +36,9 @@ ifeq ($(wildcard $(LIBMESH_CONFIG)),)
 endif
 
 CXX      := $(shell $(LIBMESH_CONFIG) --cxx)
-CXXFLAGS := $(shell $(LIBMESH_CONFIG) --cxxflags) -std=gnu++17 -Wall
-CPPFLAGS := $(shell $(LIBMESH_CONFIG) --include)
-LIBS     := $(shell $(LIBMESH_CONFIG) --libs) -lmatio
+CXXFLAGS := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --cxxflags) -std=gnu++17 -Wall
+CPPFLAGS := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --include)
+LIBS     := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --libs) -lmatio
 INCLUDES := -I$(CURDIR)/waveguide_optimization
 
 # ---- 目标 ------------------------------------------------------------------
