@@ -163,11 +163,14 @@ $ integral dif bold(x) phi_i (bold(x)) (dif)/(dif t) u(bold(x)) = R_i (bold(u)_j
     `context.side_gradient(0, qp)` 取积分点上的值和梯度——正是"先声明变量、再 reinit、
     最后按 flag 取量"的用法。`mode_decompose()`、`N_poav_integrand()` 拿到的就是
     这个 context。
-  - *`MeshRefinement` + 自定义 flagging*：`MeshRefinement my_refinement(mesh)`，
-    循环 `my_refinement.flag_elements_by(my_model); my_refinement.refine_elements();`
-    直到返回 `false`；`my_model` 是 `EM_mesh_flagging.{h,cpp}` 里的 `EMMeshFlagging`，
-    它继承 libMesh 的 flagging 接口，在 `flag_elements()` 里逐个
-    `elem->set_refinement_flag(Elem::REFINE / Elem::DO_NOTHING)`。
+  - *网格不再由 libMesh 加密*：早期版本用 `MeshRefinement` + 自定义 flagging
+    （`EM_mesh_flagging.{h,cpp}` 的 `EMMeshFlagging`，逐个
+    `elem->set_refinement_flag(Elem::REFINE)`）反复二分加密；这一套已经在"网格前移"
+    里删掉了，网格改由 Python 侧的 gmsh 尺寸场一次生成。
+  - *`allow_renumbering(false)`*：`mesh.read()` 内部会调 `prepare_for_use()`，
+    默认按**单元遍历顺序**重排节点 id；而 `design.h5` 里的 `/design/node_t` 是按
+    `.msh` 文件里的节点顺序写的，所以读网格之前必须关掉重排（`ReplicatedMesh` 上
+    这个开关走的是"只删孤立节点、不动编号"的分支）。
   - *`QGauss`*：`assemble_waveguide()` 里体单元用 `QGauss qrule(dim, FIFTH)`、
     边界用 `QGauss qface(dim-1, FIFTH)`（边界的维数比单元低一维），分别
     `fe->attach_quadrature_rule(&qrule)` / `fe_face->attach_quadrature_rule(&qface)`；
@@ -175,10 +178,11 @@ $ integral dif bold(x) phi_i (bold(x)) (dif)/(dif t) u(bold(x)) = R_i (bold(u)_j
     `assemble_QOI_rhs()` 与 `assemble_sensitivity_K()` 里也是同样的 `QGauss qface(dim-1, FIFTH)`。
   - *`Mesh` / `Elem` / `Node`*：`mesh.read(curr_params.mesh_file)` 读 gmsh 网格，
     `mesh.get_id_by_name("waveguide")` 与 `mesh_boundary.get_id_by_name("ex_opt")`
-    从 `.msh` 的 PhysicalNames 里取子域/边界 id；`mesh_snap_to_Bezier()` 遍历
-    `mesh.local_node_ptr_range()`，用 `mesh_boundary.has_boundary_id(node, opt_bd_id)`
-    挑出优化边界上的节点，并把参数 $t$ 与象限标志存进 `node->set_extra_datum(...)`，
-    `assemble_sensitivity_K()` 再把这些 datum 读回来。
+    从 `.msh` 的 PhysicalNames 里取子域/边界 id（`infile.pot` 里给了数字 id 时优先用数字）；
+    `tag_boundary_param()` 遍历 `mesh.node_ptr_range()`（**所有**节点，不是 local），
+    按节点 id 从 `/design/node_t` 取参数 $t$ 存进 `node->set_extra_datum(0, t)`，
+    并逐节点校验 $norm(bold(x) - bold(P)(t))$；`assemble_sensitivity_K()` 再用
+    `get_extra_datum<double>(0)` 读回来。象限符号不再存 datum，直接用节点坐标的符号。
 ]
 
 #code-ref[*杂项*那几条在本项目里的情况：

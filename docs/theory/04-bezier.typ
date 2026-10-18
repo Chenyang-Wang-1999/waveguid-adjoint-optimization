@@ -133,8 +133,15 @@ $ B''(t) = 2(6 C_0^+ - 6 C_1^- + V_0 + V_1) t - 6 C_0^+ + 6 C_1^- - 2 V_0 $
 
 `Bezier_interp(P, V, t, diff_order)` 按 `diff_order` 返回其中一档。
 `Nearest_t()` 用一维搜索求给定点对应的参数 $t$（默认绝对容差 $10^(-2)$，
-`Bezier.h` 里的 `double AbsTol=1e-2`），`mesh_snap_to_Bezier()` 就是用它在每步迭代里
-把边界节点投影回曲线上。
+`Bezier.h` 里的 `double AbsTol=1e-2`）。它现在由 Python 侧的
+`design.boundary_param_t()` 调用，给每个边界节点算一次 $t$ 写进 `design.h5`
+（C++ 侧不再投影节点——网格是直接在真曲线上生成的）。
+
+顺带一个有用的等价关系：上式就是控制多边形
+$[P_i, thin P_i + V_i\/3, thin P_(i+1) - V_(i+1)\/3, thin P_(i+1)]$ 的三次
+**Bézier** 段。因此把每段单独建成一条 gmsh 三次 Bézier，得到的几何与
+`Bezier_interp()` 逐位相同——这正是"网格节点天生落在曲线上"的依据
+（见 `design.bezier_polygons()`）。
 
 #code-ref[`Bezier_interp()` 逐字实现了上面三式。参数 $t$ 先被拆成"第几段 + 段内参数"：
   `id = (int)t(i)`、`loc_t = t(i) - id`，段内用 `Cp = P.row(id) + V.row(id)/3`、
@@ -149,11 +156,11 @@ $ B''(t) = 2(6 C_0^+ - 6 C_1^- + V_0 + V_1) t - 6 C_0^+ + 6 C_1^- - 2 V_0 $
   `Nearest_t()` 分两步：先在 `linspace(0, N_calc-1, 100)` 上采样取最近的折线段
   （`distance(curr_row) = (P.row(curr_row) - pt.transpose()).norm()`），再以它为初值做牛顿迭代
   （`T_test(0) += - First_diff/Second_diff`，最多 1000 次，收敛判据是
-  $|B'(t) dot (B(t) - p)| < "AbsTol"$）。`main.cpp` 的 `mesh_snap_to_Bezier()` 对
-  `ex_opt` / `in_opt` 边界上的每个节点先按象限取绝对值（`x_posi` / `y_posi`），
-  调用 `Nearest_t(Bezier_p, Bezier_V, node_pt, 1e-5)` 得到 $t$ 并把它存进
-  `node->set_extra_datum(0, t)`（组装 $(diff K)/(diff p)$ 时要用），再把节点坐标改写成
-  `Bezier_interp(..., t_vec, 0)` 的值域。]
+  $|B'(t) dot (B(t) - p)| < "AbsTol"$）。`python/design.py` 的 `boundary_param_t()` 对
+  `ex_opt` / `in_opt` 边界上的每个节点先按象限取绝对值，调用
+  `Bezier.Nearest_t(P, V, pt, 1e-8)` 得到 $t$ 写进 `design.h5` 的 `/design/node_t`；
+  C++ 侧的 `tag_boundary_param()` 按节点 id 取回 $t$，并用 `Bezier_interp(..., 0)`
+  反算曲线点与节点坐标比对（残差 $< 10^(-3)$ 才放行），既是自检也是"节点顺序没错位"的证明。]
 
 == 对控制点的灵敏度
 

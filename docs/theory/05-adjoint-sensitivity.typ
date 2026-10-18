@@ -232,8 +232,8 @@ for (unsigned int dim_id = 0; dim_id < ex_Bezier_P.cols(); dim_id++)
 // 入口边界 in_opt 用同一段循环再走一遍（dKdp2 / in_opt_sens）
 ```
 
-第 6 步在 C++ 侧没有：灵敏度写进 `cross_waveguide_result.mat` 的 `ex_opt_sens` /
-`in_opt_sens` 之后，由 Python 侧的优化循环接手。
+第 6 步在 C++ 侧没有：灵敏度写进 `result.h5` 的 `/scalars/ex_opt_sens` /
+`/scalars/in_opt_sens` 之后，由 Python 侧的优化循环接手。
 
 #code-ref[6 步与函数的对应关系：
 
@@ -319,19 +319,16 @@ print(diff_FD)
   也就是 $S_(21)$）。这里按当前脚本改写。
 ]
 
-#code-ref[校核脚本的调用链：`test_sensitivity.py` 的 `get_dof_derivative()` 先
-  `cross_waveguide(DOFs, freq=freq)`（`test_sensitivity()` 里 `freq = 0.1`）重新生成网格与
-  `infile.pot` / `.mat`，再
-  `run_solver()`（`paths.py` 里拼出 `mpiexec -n 1 <solver> -pc_type lu`）跑一次 C++ 求解器，
-  然后从 `cross_waveguide_result.mat` 里读 `S_params_0`、`ex_opt_sens`、`in_opt_sens`，
-  用 `points_to_DOF(in_sens[1:,:], ex_sens[1:,:])` 拼回设计变量顺序。
-  `optimize.py` 里的 `get_dof_derivative()` 走的是同一条链，只是多返回一个负号
-  （`return(-DOF_sens.flatten(), S_params.flatten())`），因为 `gradient_descent()`
-  的更新式是 `DOF += sens * alpha`。
-  注：当前 `python/test_sensitivity.py` 里 `get_dof_derivative(DOFs, params)` 的 `params`
-  在函数里按 `freq, w_wg, L_sim, L_fixed, epsilon, mu` 解包，而 `test_sensitivity()`
-  调用时只传了 `(0.1,)`，直接跑会报解包错误；`optimize.py` 里的同名函数传的是
-  完整的 6 元组。这是脚本本身的状态，与上面的公式无关，记录在此以免读者以为是自己用法不对。]
+#code-ref[校核脚本的调用链：`python/tests/test_fd_sensitivity.py` 先
+  `design.make_case(dofs)` 生成网格与 `design.h5`，再
+  `solver.run()`（`paths.py` 里拼出 `mpiexec -n 1 <solver> -pc_type lu`）跑一次 C++ 求解器，
+  然后从 `result.h5` 里读 `/scalars/S_params`、`ex_opt_sens`、`in_opt_sens`，
+  用 `design.sensitivity_to_dofs(in_sens, ex_sens)` 拼回设计变量顺序。
+  `optimizer.dof_derivative()` 走的是同一条链，只是多返回一个负号
+  （因为 `gradient_descent()` 的更新式是 `DOF += sens * alpha`）。
+
+  注意微扰之后必须**重划网格**（`make_case` / `build_mesh`）：网格是设计变量的函数，
+  只改 `design.h5` 不重划，曲线变了而网格没变，物理量根本不会动。]
 
 #note[
   代码里 `points_to_DOF` / `points_to_DOF2` 把 C++ 返回的 `in_opt_sens`、`ex_opt_sens`

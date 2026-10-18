@@ -11,13 +11,22 @@
     /design/ex_Bezier_P   (n,2) float64
     /design/ex_Bezier_V   (n,2) float64
     /design/dofs          (n,)  float64   设计变量本身（v2 起）
+    /design/node_t        (n_nodes,) float64   每个网格节点在优化边界曲线上的
+                          参数 t，非边界节点为 NaN（v3 起）。**下标 == ``.msh``
+                          文件里的节点顺序**，也就是 libMesh 读入后
+                          （``allow_renumbering(false)``）的节点 id。
     /ports/<name>         (1,m) int32 / (k,m) float64   端口表，名字由
                           infile.pot 里的 ``*_varname`` 决定
     /meta/*               属性：format_version / name / freq / epsilon_* /
-                          mu_* / w_wg / L_sim / L_wg_fixed
+                          mu_* / w_wg / L_sim / L_wg_fixed / 网格尺寸参数
 
 ``design.h5`` 是"算例的权威描述"：只靠它就能还原出完整的
 :class:`design.Case`（见 ``Case.load``）。
+
+``node_t`` 是"网格前移"的产物：以前 C++ 用 ``mesh_snap_to_Bezier`` 把节点
+吸附到曲线上，同时顺手记下参数 t；现在网格由 gmsh 直接在真曲线上生成，
+t 就由 Python 一次算好。C++ 侧会逐节点校验 ``‖node − P(t)‖``，所以
+"node id == 文件里的节点顺序"这个约定一旦被破坏会立刻报错，不会静默错算。
 
 ``result.h5``  (C++ -> Python，求解结果)
 
@@ -40,15 +49,18 @@ import h5py
 import numpy as np
 
 FORMAT_VERSION = 2          # result.h5 的布局版本
-DESIGN_FORMAT_VERSION = 2   # design.h5 的布局版本（2 起含 /design/dofs）
+DESIGN_FORMAT_VERSION = 3   # design.h5 的布局版本（3 起含 /design/node_t）
 
 DESIGN_KEYS = ("in_Bezier_P", "in_Bezier_V", "ex_Bezier_P", "ex_Bezier_V")
 
 
 def write_design(path, *, in_P, in_V, ex_P, ex_V, port_id, port_is_analytic,
                  port_coord, port_x_axis, incident_on, port_other_params,
-                 dofs=None, port_names=None, extra_meta=None):
-    """把几何（Bezier 控制点）和端口表写成 design.h5。
+                 dofs=None, node_t=None, port_names=None, extra_meta=None):
+    """把几何（Bezier 控制点）、端口表和节点参数 t 写成 design.h5。
+
+    ``node_t`` 见模块开头的说明；不给就跳过（旧行为，只对不需要网格的
+    检查有用——求解器要求它存在）。
 
     ``port_names`` 用于覆盖端口表在文件里的名字，键是 ``infile.pot`` 里
     对应的 ``*_varname``；默认与 ``original_mesh.py`` 写出的一致。
@@ -72,6 +84,9 @@ def write_design(path, *, in_P, in_V, ex_P, ex_V, port_id, port_is_analytic,
             d.create_dataset(name, data=np.asarray(arr, dtype=np.float64))
         if dofs is not None:
             d.create_dataset("dofs", data=np.asarray(dofs, dtype=np.float64))
+        if node_t is not None:
+            # 1 维数据集：C++ 侧的 read_matrix 会当成 (1,n) 读回
+            d.create_dataset("node_t", data=np.asarray(node_t, dtype=np.float64))
 
         p = f.create_group("ports")
         for key, arr in (("port_id", port_id),
@@ -99,8 +114,9 @@ def read_design(path):
     """读回 design.h5（主要给测试和检查用）。"""
     with h5py.File(path, "r") as f:
         out = {k: f["design/" + k][...] for k in DESIGN_KEYS}
-        # dofs 是 v2 才有的；旧文件（或 mat_to_design 转出来的）没有
+        # dofs / node_t 是后来才有的；旧文件没有
         out["dofs"] = f["design/dofs"][...] if "design/dofs" in f else None
+        out["node_t"] = f["design/node_t"][...] if "design/node_t" in f else None
         out["ports"] = {k: f["ports/" + k][...] for k in f["ports"]}
         out["meta"] = dict(f["meta"].attrs)
     return out

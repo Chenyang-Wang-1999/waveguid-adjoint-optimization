@@ -31,6 +31,28 @@ def test_design_roundtrip(tmp_path):
     assert back["meta"]["format_version"] == dataio.DESIGN_FORMAT_VERSION
     # 整数表应以整型存，实数表以 float64 存
     assert back["ports"]["port_id"].dtype.kind == "i"
+    # 没给 node_t / dofs 时不应凭空捏造
+    assert back["node_t"] is None
+    assert back["dofs"] is None
+
+
+def test_design_node_t_roundtrip(tmp_path):
+    """node_t 用 NaN 表示"不在优化边界上"，必须原样往返。"""
+    path = str(tmp_path / "design.h5")
+    node_t = np.array([np.nan, 0.0, 3.5, np.nan, 11.0])
+    dataio.write_design(
+        path,
+        in_P=np.zeros((3, 2)), in_V=np.zeros((3, 2)),
+        ex_P=np.zeros((3, 2)), ex_V=np.zeros((3, 2)),
+        port_id=np.zeros((1, 4)), port_is_analytic=np.zeros((1, 4)),
+        port_coord=np.zeros((3, 4)), port_x_axis=np.zeros((3, 4)),
+        incident_on=np.zeros((1, 4)), port_other_params=np.zeros((8, 4)),
+        node_t=node_t,
+    )
+    back = dataio.read_design(path)["node_t"]
+    assert back.shape == node_t.shape
+    assert np.array_equal(np.isnan(back), np.isnan(node_t))
+    assert np.allclose(back[np.isfinite(back)], node_t[np.isfinite(node_t)])
 
 
 # ------------------------------------------------------------------ result

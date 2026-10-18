@@ -63,7 +63,7 @@ $ B(t) = P_0 (1-t)^3 + 3 C_0^+ t (1-t)^2 + 3 C_1^- t^2 (1-t) + P_1 t^3 $
 #fig("assets/optimize/Trial_for_structure_20200223/geom.png",
   caption: [六边形仿真域（$6$ 个端口）与交叉口处的网格。蓝色是均匀波导，
     交叉口附近的深色区域是优化区，其内凹边界用 Bézier 曲线描述；
-    网格在优化区与波导内被自适应加密，在包层里明显更粗。],
+    网格在端口处最细（S 参数要沿端口积分），往包层方向平滑变粗。],
   width: 70%,
 )
 
@@ -159,7 +159,7 @@ $ (diff W)/(diff p) = "Re"(overline(bold(a)) (diff)/(diff p) bold(K) bold(a)) $�
 `optimize_cross_waveguide2()` → `gradient_descent(get_dof_derivative2, ...)`
 → `get_dof_derivative2()` → `cross_waveguide_2()`（`python/original_mesh.py`，用 Gmsh
 重新建几何与网格）→ `run_solver()`（`python/paths.py`，跑 C++ 求解器）
-→ 读回 `cross_waveguide_result.mat` 里的 `S_params_0` / `ex_opt_sens` / `in_opt_sens`
+→ 读回 `result.h5` 里的 `/scalars/S_params` / `ex_opt_sens` / `in_opt_sens`
 → `points_to_DOF2()` 把两条边界的灵敏度拼回设计变量顺序。]
 
 === 设计变量的记账方式
@@ -299,16 +299,15 @@ $L_"opt"$ 只有几个 $w_"wg"$ 量级），形状能变化的空间本来就小
 容易混淆，但两者是不同的量：原稿用 $L_"opt"$ 表示*可优化区*的尺寸，而 `optimize.py` 的
 `L_fixed` 表示从端口往里*不可动*的直波导段长度。正文表中已按这个含义标注。]
 
-#note[网格自适应加密的轮数来自 `main()` 里的 `do { ... } while(whether_continue)` 循环，
-判据是 `EM_mesh_flagging` 给出的单元标记（`EM_mesh_flagging.{h,cpp}`）。
-实测在 `data/cross_waveguide.msh` 上跑 3 轮后不再有单元被标记，于是退出循环；
-`README.md` 里 `make run` 的典型输出 `Curr refinement: 1 / 2 / 3` 也是这个意思。
-加密之后才做 `mesh_snap_to_Bezier()`：它把优化边界上的每个节点按
-`Nearest_t()` 找到对应的曲线参数 $t$，再用 `Bezier_interp()` 把它吸附到曲线上，
-并把 $t$ 与象限符号存进节点的 extra datum，供后面 `assemble_sensitivity_K()` 取用。]
+#note[网格现在完全由 Python 侧（gmsh）生成：优化边界建成分段三次 Bézier，节点天生
+落在曲线上；尺寸场在端口曲线取 $h = 0.0037$，在介质内部取 $h = lambda_"介质"\/16$，
+两者之间在 $0.025$ 的距离内过渡。C++ 侧不再做自适应加密、也不再"吸附"节点——那条
+吸附路径（`mesh_snap_to_Bezier()`）在本轮迁移里已删除，改为由 Python 一次算好每个
+边界节点的曲线参数 $t$（写进 `design.h5` 的 `/design/node_t`），C++ 逐节点校验后
+挂到节点上，供 `assemble_sensitivity_K()` 取用。]
 
 #code-ref[灵敏度矩阵的形状是 `ex_opt_sens` / `in_opt_sens` 各 $13 times 2$：
-`data/cross_waveguide.mat` 里的 `in_Bezier_P`、`ex_Bezier_P` 都是 $12 times 2$
+`data/design.h5` 里的 `in_Bezier_P`、`ex_Bezier_P` 都是 $12 times 2$
 （$12$ 个控制点，二维坐标），而 `infile.pot` 里 `start_point_mode = 0`、
 `end_point_mode = 0`，于是 `main()` 走的是
 `ex_points = ex_Bezier_P.rows() + 1` 这一支，得到 $13$ 行；

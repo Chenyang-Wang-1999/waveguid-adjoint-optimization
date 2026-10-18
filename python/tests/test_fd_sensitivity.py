@@ -1,25 +1,17 @@
-"""伴随灵敏度的方向性校验（可选、较慢）。
+"""伴随灵敏度的有限差分校核（可选、较慢）。
 
 用有限差分校核伴随梯度：沿随机方向扰动设计变量，比较
 
-    grad · delta                  （伴随给出）
+    grad · delta                  （伴随给出，grad = -d|S1|^2/dDOF）
     f(dofs+delta) - f(dofs)       （有限差分），f = |S1|^2
 
 默认不跑（要真的调 gmsh + 求解器，几十秒）。显式打开：
 
     WAVEGUIDE_FD_TEST=1 python3 -m pytest tests/test_fd_sensitivity.py -s
 
-已知问题（**重构前就存在**，不是这次模块拆分引入的）：
-``-DOF_sens`` 与 d|S1|^2/dDOF 之间差一个随方向变化的因子（实测 0.25 ~ 1.05），
-所以本用例只断言**方向正确**（符号一致），并把比值打印出来供人工检查。
-量级问题的可能来源：
-
-* C++ 里 QOI 的右端项用的是 ``2*Re(conj(S)*dS/dA)``，与 |S|^2 的链式法则
-  之间可能差一个常数 2；
-* 边界节点由 ``mesh_snap_to_Bezier`` 吸附到曲线上，扰动设计变量后每个节点
-  的参数 t 也会重新算，而网格灵敏度用的是"t 固定"的假设。
-
-要查清需要单独做一组控制实验，不在本轮重构范围内。
+注意网格是**设计的函数**：微扰设计变量之后必须重划网格，否则曲线变了、
+网格没变，物理量根本不会动（"网格前移"之前是靠 C++ 把节点吸附回新曲线
+来模拟变形；现在这条路已经删掉了）。
 """
 
 import os
@@ -39,11 +31,21 @@ pytestmark = pytest.mark.skipif(
 
 
 def _transmission(case):
-    design.write_design(case)        # 只移动边界，不重划网格
+    """按当前设计变量重建网格，再跑一次正问题，返回 |S1|^2。"""
+    case.ids = design.build_mesh(case)
+    design.write_design(case)
     return float(np.abs(solver.run(case)["S_params"][1]) ** 2)
 
 
-def test_gradient_direction(tmp_path, monkeypatch):
+def _direction_scale(geo, n_ctrl):
+    """各分量的"自然"量级：坐标取 w_wg/10，两个端点角取 0.05 rad。"""
+    scale = np.full(design.Layout(n_ctrl).size, geo.w_wg / 10.0)
+    scale[1] = 0.05
+    scale[2 * n_ctrl + 3] = 0.05
+    return scale
+
+
+def test_gradient_vs_finite_difference(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     geo, layout = design.Geometry(), design.Layout(5)
@@ -52,11 +54,12 @@ def test_gradient_direction(tmp_path, monkeypatch):
 
     grad, S = optimizer.dof_derivative(case)
     f0 = float(np.abs(S[1]) ** 2)
+    scale = _direction_scale(geo, layout.n_ctrl)
 
     rng = np.random.default_rng(1)
     ratios = []
-    for _ in range(3):
-        delta = rng.standard_normal(len(dofs0)) * 1e-4
+    for _ in range(2):
+        delta = rng.standard_normal(len(dofs0)) * scale
         case.dofs = dofs0 + delta
         df = _transmission(case) - f0
         if abs(df) < 1e-12:

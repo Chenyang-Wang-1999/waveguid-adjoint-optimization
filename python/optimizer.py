@@ -18,6 +18,22 @@ SPARAM_CSV = "S_params_list.csv"
 DOF_CSV = "DOF_list.csv"
 
 
+def last_dofs(path=DOF_CSV):
+    """日志里最后一轮的设计变量；没有历史（文件缺失 / 为空 / 只有表头外的空行）时返回 None。
+
+    空文件会让 ``np.loadtxt`` 返回 0 维、单行文件返回 1 维，所以这里把两种情况
+    都归一化掉——"有没有历史"是一个只该在开始处判断一次的事。
+    """
+    try:
+        if os.path.getsize(path) == 0:
+            return None
+    except OSError:
+        return None
+    arr = np.loadtxt(path, delimiter=",")
+    arr = np.atleast_2d(arr)
+    return arr[-1, :]
+
+
 def dof_derivative(case):
     """一次伴随求解，返回 ``(-d|S1|^2/dDOF, S_params)``。
 
@@ -64,9 +80,9 @@ def run(name="cross_waveguide", physics=None, geometry=None, n_ctrl=10,
     geo = geometry or design.Geometry()
     layout = design.Layout(n_ctrl)
 
-    if os.path.exists(DOF_CSV):
+    dofs = last_dofs()
+    if dofs is not None:
         # 断点续跑：沿用最后一轮的设计变量，日志继续追加
-        dofs = np.loadtxt(DOF_CSV, delimiter=',')[-1, :]
         case = design.make_case(dofs, ph, geo, name, build=False)
     else:
         _truncate_logs()

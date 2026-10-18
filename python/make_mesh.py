@@ -20,8 +20,8 @@ from paths import chdir_data
 def main(name="cross_waveguide", n_ctrl=10):
     chdir_data()
 
-    if os.path.exists(optimizer.DOF_CSV):
-        dofs = np.loadtxt(optimizer.DOF_CSV, delimiter=',')[-1, :]
+    dofs = optimizer.last_dofs()
+    if dofs is not None:
         source = "%s 的最后一轮" % optimizer.DOF_CSV
     else:
         geo, layout = design.Geometry(), design.Layout(n_ctrl)

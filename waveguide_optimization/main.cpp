@@ -2,7 +2,6 @@
 #include <libmesh/libmesh.h>
 #include <libmesh/mesh.h>
 #include <libmesh/mesh_base.h>
-#include <libmesh/mesh_refinement.h>
 #include <libmesh/elem.h>
 #include <libmesh/boundary_info.h>
 
@@ -35,6 +34,7 @@
 
 // C libraries
 #include <math.h>
+#include <cmath>
 #include <iostream>
 #include <Eigen/Core>
 #include <mpi.h>
@@ -47,7 +47,6 @@
 // #define DEBUG_ASSEMBLE_DKDP
 
 // My functions
-#include "EM_mesh_flagging.h"
 #include "2D_waveguide_model_params.h"
 #include "Bezier.h"
 #include "h5io.h"
@@ -58,7 +57,9 @@
 using namespace libMesh;
 
 // Function declaration
-void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, MeshBase & mesh, subdomain_id_type opt_bd_id);
+void tag_boundary_param(MeshBase & mesh, const Eigen::RowVectorXd & node_t,
+        const Eigen::MatrixXd & ex_P, const Eigen::MatrixXd & ex_V,
+        const Eigen::MatrixXd & in_P, const Eigen::MatrixXd & in_V);
 void integrate_along_side(
                       EquationSystems & es,
                       std::vector<subdomain_id_type> & selected_domain,
@@ -93,14 +94,16 @@ int main(int argc, char ** argv)
     // create mesh
     Mesh mesh(init.comm());
 
+    // 节点 id 必须和 .msh 文件里的节点顺序一致：design.h5 的 /design/node_t
+    // 就是按那个顺序写的（见 python/design.py:boundary_param_t）。libMesh 读
+    // 完网格会调 prepare_for_use()，默认按**单元遍历顺序**重排节点 id，所以
+    // 必须在 read() 之前关掉重排。
+    mesh.allow_renumbering(false);
     // load init mesh
-    // std::string mesh_file = infile("mesh_file", std::string("mesh.msh"));
     mesh.read(curr_params.mesh_file);
-    BoundaryInfo mesh_bd= mesh.get_boundary_info();
-    // refine
-    MeshRefinement my_refinement(mesh);
+    const BoundaryInfo & mesh_bd = mesh.get_boundary_info();
 
-    // set flagging
+    // 求解参数（物理量、端口模式等；它们不参与建模，建模在 Python 侧）
     unsigned int start_point_mode = infile("start_point_mode",0);
     unsigned int end_point_mode = infile("end_point_mode",1);
     double epsilon_wg = infile("epsilon_wg", 13.0);
@@ -125,49 +128,23 @@ int main(int argc, char ** argv)
         : mesh_bd.get_id_by_name("in_opt");
 
     Eigen::MatrixXd in_Bezier_P, in_Bezier_V, ex_Bezier_P, ex_Bezier_V;
-    // 设计变量（Bezier 控制点）来自设计变量 + 端口表所在的 design.h5
+    Eigen::RowVectorXd node_t;
+    // 设计变量（Bezier 控制点）和边界节点的曲线参数来自 design.h5。
+    // 网格由 Python 侧（gmsh）直接在真曲线上生成，C++ 这边不再加密、也不再
+    // 吸附节点，只把 t 挂到节点上供灵敏度装配使用。
     {
         h5io::File design(curr_params.design_file, false);
         in_Bezier_P = h5io::read_matrix(design.id(), "design/in_Bezier_P");
         in_Bezier_V = h5io::read_matrix(design.id(), "design/in_Bezier_V");
         ex_Bezier_P = h5io::read_matrix(design.id(), "design/ex_Bezier_P");
         ex_Bezier_V = h5io::read_matrix(design.id(), "design/ex_Bezier_V");
+        Eigen::MatrixXd nt = h5io::read_matrix(design.id(), "design/node_t");
+        node_t = Eigen::Map<Eigen::RowVectorXd>(nt.data(), nt.size());
     }
-
-    std::vector<subdomain_id_type> model_domain_id = {id_wg};
-    std::vector<double> model_index = {1.0/(8*freq/8)> sqrt(epsilon_wg) ? 1.0/(8*freq/8): sqrt(epsilon_wg)};
-
-    std::vector<subdomain_id_type> port_id;
-
-    for(unsigned int j = 0 ; j < curr_params.port_id.size(); j ++)
-    {
-        port_id.push_back(curr_params.port_id(j));
-    }
-
-    EMMeshFlagging my_model(&mesh,model_domain_id, model_index, sqrt(epsilon_air),
-            port_id, 1.0/20);
-    my_model.set_freq(freq);
-
-#ifndef NO_MESH_REFINEMENT
-    unsigned int refinement_times = 0;
-    bool whether_continue;
-    do
-    {
-        // refine
-        my_refinement.flag_elements_by(my_model);
-        whether_continue = my_refinement.refine_elements();
-        refinement_times ++;
-        std::cout << "Curr refinement: " << refinement_times <<'\n';
-    }while(whether_continue);
-#endif // NO_MESH_REFINEMENT
 
     mesh.add_node_datum<double>("Bezier_t");
-    mesh.add_node_datum<bool>("x_positive");
-    mesh.add_node_datum<bool>("y_positive");
-
-    mesh_snap_to_Bezier(ex_Bezier_P, ex_Bezier_V, mesh, id_ex_opt);
-
-    mesh_snap_to_Bezier(in_Bezier_P, in_Bezier_V, mesh, id_in_opt);
+    tag_boundary_param(mesh, node_t, ex_Bezier_P, ex_Bezier_V,
+                       in_Bezier_P, in_Bezier_V);
 
     // output
     mesh.write(curr_params.out_mesh_file);
@@ -350,37 +327,66 @@ int main(int argc, char ** argv)
     return 0;
 }
 
-void mesh_snap_to_Bezier(Eigen::MatrixXd &Bezier_p, Eigen::MatrixXd &Bezier_V, MeshBase & mesh, subdomain_id_type opt_bd_id)
+double curve_deviation(const Eigen::MatrixXd & P, const Eigen::MatrixXd & V,
+                       double t, const Node & node)
 {
-    BoundaryInfo & mesh_boundary = mesh.get_boundary_info();
-    for(Node* node: mesh.local_node_ptr_range())
+    // Bezier_interp 会就地 clamp 参数，所以要传一份副本
+    Eigen::VectorXd t_vec(1);
+    t_vec(0) = t;
+    const Eigen::MatrixXd p = Bezier_interp(P, V, t_vec, 0);
+    const Eigen::Vector2d target(std::abs(node(0)), std::abs(node(1)));
+    return (p.row(0).transpose() - target).norm();
+}
+
+void tag_boundary_param(MeshBase & mesh, const Eigen::RowVectorXd & node_t,
+        const Eigen::MatrixXd & ex_P, const Eigen::MatrixXd & ex_V,
+        const Eigen::MatrixXd & in_P, const Eigen::MatrixXd & in_V)
+{
+    // 网格已经由 Python 侧（gmsh）直接建在真曲线上，这里不再移动任何节点，
+    // 只把 Python 算好的曲线参数 t 挂到节点上（灵敏度装配要用）。以前这一步
+    // 是"吸附"：每 rank 只处理 local 节点，非 owner 节点的 datum 没被赋值，
+    // 于是 t 是垃圾值，n>1 时必崩。
+    if ((dof_id_type)node_t.size() != mesh.n_nodes())
+        libmesh_error_msg("design.h5 的 /design/node_t 有 " << node_t.size()
+                << " 个元素，但网格有 " << mesh.n_nodes() << " 个节点。"
+                << "（design.h5 和 mesh_file 不是同一次生成的，"
+                << "请用 python/make_mesh.py 重新生成。）");
+
+    // 自校验的容差：最细的边界边长约 3e-3，取 1e-3 是它的 1/3。实测残差
+    // 绝大多数是 1e-17 量级，只有极少数落在曲线自折叠处的节点会到 1e-4，
+    // 而"节点顺序错位"造成的残差至少是一个单元边长，所以这个阈值足够区分。
+    const double tol = 1e-3;
+
+    unsigned int n_tagged = 0;
+    double max_dev = 0.;
+    for (Node * node : mesh.node_ptr_range())
     {
-        if(mesh_boundary.has_boundary_id(node, opt_bd_id))
-        {
-            Eigen::VectorXd node_pt(2);
-            bool x_posi = ((*node)(0) > 0), y_posi = ((*node)(1) > 0);
-            // convert to absolute value
-            node_pt(0) = x_posi?(*node)(0):(-(*node)(0));
-            node_pt(1) = y_posi?(*node)(1):(-(*node)(1));
+        if (node->id() >= (dof_id_type)node_t.size())
+            continue;
+        const double t = node_t((Eigen::Index)node->id());
+        if (!std::isfinite(t))
+            continue;   // 非优化边界上的节点
 
-            double t = Nearest_t(Bezier_p, Bezier_V, node_pt, 1e-5);
+        node->set_extra_datum(0, t);
+        ++n_tagged;
 
-            // append t
-            node->set_extra_datum(0, t);
-            node->set_extra_datum(1, x_posi);
-            node->set_extra_datum(2, y_posi);
-            Eigen::VectorXd t_vec(1);
-            t_vec(0) = t;
-            Eigen::MatrixXd curr_pt;
-
-            curr_pt = Bezier_interp(Bezier_p, Bezier_V, t_vec, 0);
-
-            // reset node
-            (*node)(0) = x_posi?curr_pt(0,0):-curr_pt(0,0);
-            (*node)(1) = y_posi?curr_pt(0,1):-curr_pt(0,1);
-        }
-
+        // 顺序错位检测：把参数喂回去应该还原出这个节点（折回第一象限后比较）。
+        // 两个曲线都试一遍，取更近的那个——t 本身不记录它属于哪条曲线。
+        const double dev = std::min(
+            curve_deviation(ex_P, ex_V, t, *node),
+            curve_deviation(in_P, in_V, t, *node));
+        max_dev = std::max(max_dev, dev);
     }
+
+    mesh.comm().max(max_dev);
+    mesh.comm().max(n_tagged);
+    libMesh::out << "Bezier 参数: " << n_tagged << " 个边界节点, 最大残差 "
+                 << max_dev << std::endl;
+
+    if (max_dev > tol)
+        libmesh_error_msg("节点和 /design/node_t 对不上（最大残差 " << max_dev
+                << " > " << tol << "）：design.h5 里的 node_t 不是按这张网格的"
+                << "节点顺序写的，或者读网格时节点被重排了。");
 }
 
 
@@ -1223,8 +1229,12 @@ void assemble_sensitivity_K(System & system, Parameters & params,
                     // normalize
                     for(unsigned int i=0; i<side_elem->n_nodes();i++)
                     {
-                        bool x_posi = side_elem->node_ptr(i) ->get_extra_datum<bool>(1);
-                        bool y_posi = side_elem->node_ptr(i) ->get_extra_datum<bool>(2);
+                        // 节点在哪个象限决定了灵敏度分量的符号。以前存成 node
+                        // datum（mesh_snap_to_Bezier 的副产物），现在直接看坐标：
+                        // 网格是四个象限镜像出来的，取 abs 之前先记下符号即可。
+                        const Node & curr_node = *side_elem->node_ptr(i);
+                        bool x_posi = (curr_node(0) > 0);
+                        bool y_posi = (curr_node(1) > 0);
 
                         if(! x_posi)
                         {

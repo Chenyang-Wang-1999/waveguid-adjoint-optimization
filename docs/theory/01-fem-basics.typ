@@ -92,14 +92,13 @@ $ -u''(x) = f(x), quad 0 < x < 1 \
 
   这就是 Galerkin 正交性（误差在能量内积下与整个 $V_h$ 正交），是能量范数误差估计的出发点。
 
-#code-ref[误差估计里的网格尺寸 $h$ 在代码里不是手动指定的，而是由
-  `waveguide_optimization/EM_mesh_flagging.cpp` 的 `flag_elements()` 自动决定：
-  单元体积超过 $(lambda\/16)^d$（`max_elem_vol = pow(curr_wl/16, dim)`，
-  `curr_wl = 1/(freq*index)`，`index` 是该子域的折射率）就置 `Elem::REFINE`；
-  端口上的边另有 $lambda\/20$ 的判据（`main()` 里构造 `EMMeshFlagging` 时传入的
-  `1.0/20`，对应 `if(side_elem->volume() > pow(port_size, dim-1))`）。
-  `main()` 用 `do { my_refinement.flag_elements_by(my_model); } while
-  (my_refinement.refine_elements())` 反复加密，直到没有单元需要再细分。]
+#code-ref[误差估计里的网格尺寸 $h$ 在代码里不是手动指定的，而是由 Python 侧的尺寸场
+  给定：`python/design.py` 的 `mesh_sizes()` 取
+  $h_"介质" = lambda_"介质" \/ 16$（`curr_wl = 1/(freq*sqrt(epsilon))`，与早期 C++ 版
+  `EM_mesh_flagging.cpp` 的判据 $(lambda\/16)^d$ 一致），端口曲线另取
+  `PORT_SIZE = 0.0037`（S 参数沿端口积分，必须更细）。
+  `build_mesh()` 把这些值写进 gmsh 的 `Distance` + `Threshold` 背景场，
+  一次生成的网格就满足判据，不再有"反复二分加密"的过程。]
 
 === Poisson 方程的有限元方法
 

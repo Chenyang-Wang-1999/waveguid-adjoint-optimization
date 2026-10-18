@@ -350,16 +350,16 @@ $lambda approx 1.55$ µm 处*单模*传输；环与连接波导之间的空气�
   *结构与网格*：`python/original_mesh.py` 里的 `cross_waveguide()`、`cross_waveguide_2()`
   用 `pygmsh` + `gmsh` 生成几何与二阶网格，边界由 Bézier 控制点给出
   （`Bezier.Bezier_interp()`、`Bezier.Bezier_tangent_vector()` 求曲线上的点与端点切矢），
-  并写出 `data/cross_waveguide.msh`、`data/cross_waveguide.mat`
+  并写出 `data/cross_waveguide.msh`、`data/design.h5`
   （端口编号/坐标/朝向/入射端口，以及曲线的控制点与切矢）和 `data/infile.pot`（运行参数）。
   端口处的传播常数 $beta$（上面的相位 $k pi r$ 就来自它）由
   `python/propagation_constant0.py` 的 `get_beta_from_k0()` 用牛顿迭代解色散方程得到。
 
   *求解与 S 参数*：`waveguide_optimization/main.cpp` 读入上述文件，
-  `mesh_snap_to_Bezier()` 把网格节点贴到 Bézier 曲线上，`assemble_waveguide()` 装配二维
+  网格节点由 gmsh 直接生成在 Bézier 曲线上，`assemble_waveguide()` 装配二维
   麦克斯韦系统，端口的解析模式场在 `waveguide_optimization/2D_waveguide_model_params.{h,cpp}`
   的 `analytic_E_field()` 里，求解后由 `integrate_along_side(..., mode_decompose)` 把
-  每个端口的场投影到模式上，得到 $S$ 参数并写进 `cross_waveguide_result.mat` 的 `S_params_0`。
+  每个端口的场投影到模式上，得到 $S$ 参数并写进 `result.h5` 的 `/scalars/S_params`。
 
   *驱动与拟合*：`python/optimize.py` 的 `get_dof_derivative()` 负责“重建几何 → 调求解器 →
   读回 `S_params_0`”这一循环，`get_S_params()` / `gradient_descent()` 再把 $S$ 参数、

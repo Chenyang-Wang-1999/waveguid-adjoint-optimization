@@ -16,24 +16,24 @@
 ```
 .
 ├── waveguide_optimization/     C++ 求解器（libMesh + PETSc/SLEPc）
-│   ├── main.cpp                主流程：读网格 → 加密 → 吸附到 Bézier → 装配求解
+│   ├── main.cpp                主流程：读网格 → 给节点挂上 Bézier 参数 → 装配求解
 │   │                           → 提取 S 参数 → 解伴随方程 → 组装 dK/dp → 输出
 │   ├── 2D_waveguide_model_params.{h,cpp}   端口参数与解析波导模式 E0、β
-│   ├── EM_mesh_flagging.{h,cpp}            按频率与折射率自适应加密网格
 │   ├── Bezier.{h,cpp}                      Bézier 求值/插值/最近点/控制点灵敏度
 │   └── TriDiagonal.h                       三对角求解（Thomas 算法）
 ├── python/                     Python 侧（扁平模块，数据契约集中在一个文件里）
 │   ├── make_mesh.py            入口：生成 gmsh 网格 + design.h5
 │   ├── run_optimize.py         入口：跑优化循环
 │   ├── design.py               几何与参数：DOF↔Bézier 控制点、端口表、gmsh 建模
+│   │                           （网格尺寸场、几何自检、节点参数 t 都在这里）
 │   ├── physics.py              材料/频率参数与平板波导色散（求 β）
 │   ├── solver.py               求解器控制：写 infile.pot、调 mpiexec、校验、读结果
 │   ├── optimizer.py            主优化器：目标/梯度封装 + 梯度下降
-│   ├── postproc.py             后处理：读场、pyvista 可视化
+│   ├── postproc.py             后处理：读场、按 physical group 给网格上色、pyvista 可视化
 │   ├── dataio.py               数据契约：design.h5 / result.h5
 │   ├── paths.py                统一的路径/命令入口
 │   └── tests/                  pytest：数据契约、设计变量映射、有限差分（可选）
-├── data/                       运行输入（infile.pot、cross_waveguide.msh/.mat）
+├── data/                       运行输入（infile.pot、cross_waveguide.msh、design.h5）
 ├── docs/                       Typst 文档（理论、构建与运行、结果）
 ├── Makefile
 ├── config.mk.example
@@ -73,10 +73,15 @@ cd data && python3 ../python/run_optimize.py
 `make run` 的典型输出：
 
 ```
-Curr refinement: 1 / 2 / 3
+Bezier 参数: 356 个边界节点, 最大残差 7.58911e-05
 Id of Ez: 0
 end point mode:0
 ```
+
+第二行是网格自检：`design.h5` 里的 `/design/node_t` 必须和这张网格的节点顺序对得上。
+现在**网格完全由 Python 侧（gmsh）生成**：优化边界是真 Bézier 曲线，节点天生落在曲线上；
+加密判据（端口 `h=0.0037`、介质内部 `λ/16`）也由 Python 的尺寸场给定。C++ 不再加密、不再
+吸附节点，只负责求解。
 
 产物是 `data/result.h5`（HDF5，h5py 直接读），含
 
@@ -89,8 +94,9 @@ end point mode:0
 
 各 rank 的局部量（S 参数的单元积分、按节点拼出的场）在 **C++ 侧用 MPI 归约**
 后再由 rank 0 写出，所以文件里一律是全局量。几何输入在同一个目录的
-`design.h5`（设计变量 + Bézier 控制点 + 端口表 + 完整物理/几何参数）——它是自描述的，
-`design.Case.load()` 只靠这一个文件就能还原出整个算例。
+`design.h5`（设计变量 + Bézier 控制点 + 端口表 + 完整物理/几何参数 + 网格尺寸参数
++ 每个节点的曲线参数 `node_t`）——它是自描述的，`design.Case.load()` 只靠这一个文件
+就能还原出整个算例。
 
 `data/infile.pot` 是求解器的全部运行参数（频率、介电常数、端口、Bézier 端点模式等），
 格式是 GetPot。
@@ -114,9 +120,12 @@ $ (diff W)/(diff p) = - Re( overline(bold(a))^T (diff bold(K))/(diff p) bold(a) 
 
 代价对比：有限差分需要 $N + 1$ 次线性求解，伴随法只要 2 次（正问题 + 伴随）。
 
-**验证。** `python/tests/test_fd_sensitivity.py` 用随机扰动设计变量、比较有限差分与伴随梯度
-（默认跳过，`WAVEGUIDE_FD_TEST=1` 才跑）。目前只校验方向：伴随梯度与有限差分同号，
-但两者量级差一个随方向变化的因子（0.25 ~ 1.05），见该文件顶部说明。
+**验证。** `python/tests/test_fd_sensitivity.py` 用随机扰动设计变量（扰动后**重划网格**，
+因为网格是设计的函数）、拿中心差分的 $f(bold(p)+bold(delta)) - f(bold(p)-bold(delta))$ 与
+伴随的 $bold(g) dot bold(delta)$ 比较（默认跳过，`WAVEGUIDE_FD_TEST=1` 才跑）。
+实测 7 个方向/步长的符号全部一致，量级比（伴随/差分）落在 $0.95 ~ 1.27$，均值 $approx 1.12$、
+标准差 $0.06$。残差主要来自"有限差分重划网格、伴随假设网格随节点连续变形"这一不一致，
+以及 $lambda\/16$ 的离散误差。
 
 ## 结果
 

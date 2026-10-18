@@ -92,15 +92,21 @@ $C_0^+, C_1^-$ 决定。为了让相邻曲线 $C^2$ 连续、并在端口处保�
 用一个二阶拉格朗日单元（libMesh 变量 `Ez`，类型 `SECOND`）离散 $E^z$，五阶 Gauss 积分。
 线性系统是复对称（非 Hermite）的，用 PETSc 直接法求解（`-pc_type lu`）。
 
-网格来自 Gmsh（`.msh`），读入后由 `EMMeshFlagging` 按“每波长单元数足够、且按折射率加权”
-的准则自适应加密，直到没有单元需要再分（实测加密 3 轮）。加密完成后再把优化边界上的节点
-“吸附”到 Bézier 曲线上，让网格跟着控制点变形。
+网格完全由 Python 侧的 Gmsh 生成（`.msh`）：优化边界建成**分段三次 Bézier**（每个控制点
+区间一段），所以网格节点天生落在真曲线上；单元尺寸由背景尺寸场给定——端口曲线
+$h = 0.0037$（S 参数沿端口积分，这里必须细），介质内部 $h = lambda_"介质" / 16$，两者之间
+用 `Threshold` 场在 $0.025$ 的距离内过渡。
 
 #code-ref[
-  `waveguide_optimization/EM_mesh_flagging.cpp` 的 `flag_elements()` 给出加密判据，
-  `main.cpp` 的 `main()` 里循环调用 `MeshRefinement::refine_elements()`；
-  吸附在 `mesh_snap_to_Bezier()` 里做，用 `Bezier::Nearest_t()` 把每个边界节点投影回曲线。
+  `python/design.py` 的 `build_mesh()` 建模、`_apply_size_field()` 给尺寸场、
+  `geometry_margins()` 做几何自检（边界越过对称轴会让相邻象限的镜像真的相交，
+  Gmsh 遇到这种几何会直接 abort，所以先拦下）；`bezier_polygons()` 给出每段 Bézier 的
+  控制多边形，它与 `Bezier_interp()` 逐位等价。
 ]
+
+C++ 侧不再加密、不再移动节点，只把 Python 算好的曲线参数 $t$ 挂到节点上
+（`/design/node_t`，按 `.msh` 里的节点顺序）；`tag_boundary_param()` 会逐节点校验
+$norm(bold(x) - bold(P)(t))$，节点顺序一旦错位就立刻报错。
 
 === S 参数提取
 
@@ -153,10 +159,9 @@ $bold(g) = 2 S overline((diff S)/(diff A))$ 与代码的逐项对应）见 `theo
   stroke: none,
   inset: (x: 0.5em, y: 0.4em),
   table.header([*文件*], [*职责*]),
-  [`main.cpp`], [`main()`：读网格 → 加密 → 吸附到 Bézier → 装配求解 → 提取 S 参数 → 解伴随方程 → 组装 $(diff K)/(diff p)$ → 输出。另外含 `assemble_waveguide()`、`mode_decompose()`、`integrate_along_side()`、`assemble_QOI_rhs()`、`assemble_sensitivity_K()`、`mesh_snap_to_Bezier()`],
+  [`main.cpp`], [`main()`：读网格 → 给节点挂上 Bézier 参数 → 装配求解 → 提取 S 参数 → 解伴随方程 → 组装 $(diff K)/(diff p)$ → 输出。另外含 `assemble_waveguide()`、`mode_decompose()`、`integrate_along_side()`、`assemble_QOI_rhs()`、`assemble_sensitivity_K()`、`tag_boundary_param()`],
   [`2D_waveguide_model_params.{h,cpp}`], [`WaveguideParams`：读 `infile.pot` 与 `.mat`；`analytic_E_field()` 给出端口解析模式的 $E_0, beta$ 及其 $H$、$B$ 分量],
-  [`EM_mesh_flagging.{h,cpp}`], [`EMMeshFlagging::flag_elements()`：按频率与折射率给出加密判据],
-  [`Bezier.{h,cpp}`], [`Bezier_tangent_vector()`（三对角系统求切矢）、`Bezier_interp()`、`Nearest_t()`、`Bezier_V_sensitivity()`；定义 `EXPORT_PYLIB` 时可编成 Python 模块],
+    [`Bezier.{h,cpp}`], [`Bezier_tangent_vector()`（三对角系统求切矢）、`Bezier_interp()`、`Nearest_t()`、`Bezier_V_sensitivity()`；定义 `EXPORT_PYLIB` 时可编成 Python 模块],
   [`TriDiagonal.h`], [`Solve_tridiagonal()`：Thomas 算法的模板实现],
 )
 
@@ -170,11 +175,11 @@ $bold(g) = 2 S overline((diff S)/(diff A))$ 与代码的逐项对应）见 `theo
   table.header([*文件*], [*职责*]),
   [`make_mesh.py`], [入口：生成 gmsh 网格与 `design.h5`],
   [`run_optimize.py`], [入口：跑优化循环],
-  [`design.py`], [几何与参数：DOF ↔ Bézier 控制点、端口表、gmsh 建模（唯一产生网格的地方）],
+  [`design.py`], [几何与参数：DOF ↔ Bézier 控制点、端口表、gmsh 建模、网格尺寸场、几何自检、节点参数 $t$（唯一产生网格的地方）],
   [`physics.py`], [材料/频率参数与平板波导色散（求 $beta$，含频率扫描时用上一个解当初值）],
   [`solver.py`], [求解器控制：写 `infile.pot`、调 `mpiexec`、检查退出码、读回结果],
   [`optimizer.py`], [主优化器：目标/梯度封装 + 梯度下降],
-  [`postproc.py`], [后处理：读场、`pyvista` 可视化],
+  [`postproc.py`], [后处理：读场、按 physical group 给网格上色（`plot_mesh()`）、`pyvista` 可视化],
   [`dataio.py`], [数据契约：`design.h5` / `result.h5` 的唯一读写入口],
   [`paths.py`], [统一的路径与外部命令入口，所有脚本都在 `data/` 下工作],
   [`tests/`], [pytest：数据契约、设计变量映射、有限差分（可选）],
