@@ -398,14 +398,38 @@ void integrate_along_side(
   integration_value.resize(selected_domain.size());
   integration_value.setZero();
 
+  // libMesh 的 FE 对象是"按需计算"的：get_*() 访问器除了返回值，还负责
+  // 登记"这个量需要被计算"，真正的计算发生在 reinit() 里。所以所有
+  // get_*() 必须在任何一次 reinit() 之前调用；一个量都没登记就调
+  // reinit()，自 libMesh 1.9 起是硬错误（旧版靠已废弃的"隐式全算"兜底
+  // 才没有暴露）。
+  //
+  // 本函数只做边界积分，元素内部的 FE 数据一个都不用，因此只登记 side FE
+  // 上的量：mode_decompose 需要 phi(side_value) 和 dphi(side_gradient)，
+  // 再加上几何量（get_JxW/get_xyz/normals 都归入 calculate_map）；
+  // N_poav_integrand 还需要 normals。
+  {
+    FEBase * side_fe = context.get_side_fe(0); // var0: Ez
+    side_fe->get_phi();
+    side_fe->get_dphi();
+    side_fe->get_JxW();
+    side_fe->get_normals();
+  }
+
   for (const auto & elem : mesh.active_local_element_ptr_range())
     {
       // Get the degree of freedom indices for the
       // current element.  These define where in the global
       // matrix and right-hand-side this element will
       // contribute to.
+      //
+      // 注意：这里不再调用 context.elem_fe_reinit()。本函数全程只用到
+      // side 数据（get_side_fe / side_value / side_gradient /
+      // has_side_boundary_id），元素内部的 FE 从未被读取；而
+      // elem_fe_reinit() 会对该维度下所有元素 FE 调用 reinit()，
+      // 在没有任何 get_*() 登记时就会报错。去掉它既符合语义，也省掉
+      // 一批本来就不需要的计算。
       context.pre_fe_reinit(sys,elem);
-      context.elem_fe_reinit();
       bool use_curr_elem = true;
       if(parent_domain_id)
       {
@@ -1005,6 +1029,15 @@ void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name)
     QGauss qface(dim-1, FIFTH);
     fe_face->attach_quadrature_rule (&qface);
 
+    // 预登记：get_*() 必须在任何 reinit() 之前调用（见 integrate_along_side
+    // 里的说明）。这些引用指向 FE 对象内部的缓存，在多次 reinit() 之间保持
+    // 有效，所以提到循环外声明一次即可。
+    const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
+    const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
+    const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
+    const std::vector<Real> & JxW_face = fe_face->get_JxW();
+    const std::vector<Point> & qface_point = fe_face->get_xyz();
+
     DenseVector<Number> Fe;
     std::vector<dof_id_type> dof_indices;
 
@@ -1032,11 +1065,8 @@ void assemble_QOI_rhs(EquationSystems &es, const std::string &sys_name)
                 // Integration: \int 1/4 (D_mode^*\cdot E + H_mode^* \cdot B)
                 // Bx = - i /omega \partial_y E^z
                 // By = i / omega  \partial_x E^z
-                const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
-                const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
-                const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
-                const std::vector<Real> & JxW_face = fe_face->get_JxW();
-                const std::vector<Point> & qface_point = fe_face->get_xyz();
+                // 注意：phi_face / dphidx_face / dphidy_face / JxW_face /
+                // qface_point 已在循环外预登记（get_*() 必须在 reinit() 之前）。
 
                 // Integrate
                 for(unsigned int i = 0; i < n_dofs; i++)
@@ -1122,6 +1152,13 @@ void assemble_sensitivity_K(System & system, Parameters & params,
     QGauss qface(dim-1, FIFTH);
     fe_face->attach_quadrature_rule (&qface);
 
+    // 预登记：get_*() 必须在任何 reinit() 之前调用（见 integrate_along_side
+    // 里的说明）。这些引用指向 FE 对象内部的缓存，在多次 reinit() 之间保持
+    // 有效。
+    const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
+    const std::vector<Point> & normal_face = fe_face->get_normals();
+    const std::vector<Real> & JxW_face = fe_face->get_JxW();
+
     DenseMatrix<Number> Ke;
     std::vector<dof_id_type> dof_indices;
 
@@ -1139,14 +1176,9 @@ void assemble_sensitivity_K(System & system, Parameters & params,
                         cast_int<unsigned int>(dof_indices.size());
                     Ke.resize (n_dofs, n_dofs);
 
-                    // reinitialize and get fe data
+                    // reinitialize; phi_face / normal_face / JxW_face 已在
+                    // 循环外预登记（get_*() 必须在 reinit() 之前）
                     fe_face->reinit(elem, side);
-                    const std::vector<std::vector<Real>> & phi_face = fe_face->get_phi();
-                    // const std::vector<std::vector<Real>> & dphidx_face = fe_face->get_dphidx();
-                    // const std::vector<std::vector<Real>> & dphidy_face = fe_face->get_dphidy();
-                    const std::vector<Point> & normal_face = fe_face->get_normals();
-                    const std::vector<Real> & JxW_face = fe_face->get_JxW();
-                    // const std::vector<Point> & qface_point = fe_face->get_xyz();
 
                     std::unique_ptr<Elem> side_elem = elem->side_ptr(side);
 
