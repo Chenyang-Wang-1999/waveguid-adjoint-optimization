@@ -39,18 +39,69 @@ def test_control_points_inverse():
     assert np.allclose(ex_P[-1], [0.0, dofs[2 * layout.n_ctrl + 2]])
 
 
-def test_geometry_margins_detects_axis_crossing():
-    """几何自检必须能发现"边界越过对称轴"——那是 gmsh 直接 abort 的入口。"""
+def test_axis_crossings_detects_fold():
+    """几何自检必须能发现"壁面越过对称轴"——那是气泡/漏光通道的来源。"""
+    Bezier = pytest.importorskip("Bezier")
+    geo, layout = design.Geometry(), design.Layout(10)
+    dofs = design.initial_dofs(geo, layout)
+    assert all(v is None for v in design.axis_crossings(dofs, geo, layout).values())
+
+    bad = dofs.copy()
+    bad[3] = -0.02          # in 曲线第一个内点的 y 变负 -> 越过 x 轴
+    assert design.axis_crossings(bad, geo, layout)["in"] is not None
+
+
+def test_end_axis_alignment_gradient_is_exact():
+    """惩罚项只依赖 θ，解析梯度必须和有限差分逐位吻合。"""
     pytest.importorskip("Bezier")
     geo, layout = design.Geometry(), design.Layout(10)
     dofs = design.initial_dofs(geo, layout)
-    # 直线设计完全落在象限内：曲线的端口端点按构造就在坐标轴上（== 0），
-    # 所以判据是"不越界"而不是"严格大于 0"
-    assert min(design.geometry_margins(dofs, geo, layout).values()) >= -1e-12
 
+    def total(x):
+        return sum(design.end_axis_alignment(x, geo, layout))
+
+    g = design.end_axis_alignment_grad(dofs, geo, layout)
+    h = 1e-7
+    for i in (1, 2 * layout.n_ctrl + 3):
+        e = dofs.copy()
+        e[i] += h
+        assert abs(g[i] - (total(e) - total(dofs)) / h) < 1e-6
+    # 语义检查：in 端点垂直于 x 轴、ex 端点垂直于 y 轴时惩罚应为 0
+    upright = dofs.copy()
+    upright[1] = 0.5 * np.pi                      # in: 竖直 -> 垂直 x 轴
+    upright[2 * layout.n_ctrl + 3] = 0.0          # ex: 水平 -> 垂直 y 轴
+    assert max(design.end_axis_alignment(upright, geo, layout)) < 1e-12
+    # 反过来（沿轴）应该 = 1
+    along = dofs.copy()
+    along[1] = 0.0
+    along[2 * layout.n_ctrl + 3] = 0.5 * np.pi
+    assert min(design.end_axis_alignment(along, geo, layout)) > 1 - 1e-12
+
+    # 其余分量必须是 0（惩罚不依赖别的 dof）
+    others = np.ones(layout.size, dtype=bool)
+    others[[1, 2 * layout.n_ctrl + 3]] = False
+    assert np.all(g[others] == 0.0)
+
+
+def test_truncate_and_refit_removes_crossing():
+    """截断重拟合：越轴消失、dof 个数不变、保留弧段仍然贴合原曲线。"""
+    Bezier = pytest.importorskip("Bezier")
+    pytest.importorskip("scipy")
+    geo, layout = design.Geometry(), design.Layout(10)
+    dofs = design.initial_dofs(geo, layout)
+
+    # 人为造一个越轴：把 in 曲线第一个内点推到 x 轴下方
     bad = dofs.copy()
-    bad[0] = -0.01          # 端点 x_in_bd 变负 -> in 曲线越过 y 轴
-    assert design.geometry_margins(bad, geo, layout)["in_min_x"] < 0
+    bad[3] = -0.02
+    crossings = design.axis_crossings(bad, geo, layout)
+    if all(v is None for v in crossings.values()):
+        pytest.skip("这个扰动没有造出越轴")
+
+    new, info = design.truncate_and_refit(bad, geo, layout)
+    assert info["truncated"]
+    assert len(new) == len(bad)
+    assert all(v is None for v in design.axis_crossings(new, geo, layout).values())
+    assert max(info["fit_error"].values()) < 5e-3      # 小于半个单元
 
 
 def test_sensitivity_to_dofs_shape():

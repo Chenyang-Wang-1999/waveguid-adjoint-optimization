@@ -13,7 +13,7 @@
 import os
 import sys
 from dataclasses import dataclass, field
-from math import cos, pi, sin, sqrt
+from math import atan2, cos, pi, sin, sqrt
 
 import numpy as np
 
@@ -37,8 +37,15 @@ WL_PER_SIZE = 16         # 介质内部：目标边长 ≤ 介质内波长 / WL_
 GRADE_LEN = 0.025        # 从端口尺寸过渡到内部尺寸的距离
 DISTANCE_SAMPLING = 200  # Distance 场每条曲线的采样点数
 
-# 允许优化边界越出对称轴多少（相对内部目标边长）。见 geometry_margins。
-GEOMETRY_TOL_FACTOR = 0.05
+# 网格质量门与局部加密（见 mesh_quality / build_mesh）。标定依据：初始直线设计
+# 的网格 q_min = 0.235，而越轴设计会出现 q ≈ 1e-4 的针状单元。
+QUALITY_MIN = 0.05       # 低于此值视为"坏单元"，触发局部加密
+# 局部加密重试轮数。默认 0（关闭）：实测两种实现都不好用——gmsh 的 Box 场
+# 在 VOut 很大时退化成台阶，反而制造新的坏单元；用 MathEval 造光滑凹陷会让
+# gmsh 4.9.5 直接 abort。等定下更合适的公式再打开。
+QUALITY_MAX_ROUNDS = 0
+QUALITY_BLOB_FACTOR = 0.5  # 加密目标的边长 = 坏单元当地边长的这个倍数
+SIZE_GROWTH = 1.3        # 相邻单元尺寸的增长倍数上限（决定加密过渡区半径）
 
 # 端口编号（对应 gmsh 里 add_physical 的顺序，见 build_mesh 末尾）
 PORT_IDS = np.array([3, 4, 5, 6], dtype=int)
@@ -245,26 +252,183 @@ def bezier_polygons(dofs, geometry, layout):
     return _cubic_polygons(in_P, in_V), _cubic_polygons(ex_P, ex_V)
 
 
-def geometry_margins(dofs, geometry, layout, n_samples=2000):
-    """两条优化边界"离对称轴还有多远"：正数表示还在自己象限里，负数表示越界。
+# --------------------------------------------------------- 几何合法性 / 修复
 
-    四个象限的曲线是把第一象限的那条**镜像**出来的，所以曲线一旦越过对称轴，
-    相邻象限的镜像就会真的相交。这在物理上意味着波导壁越过中心线（端口几何
-    已经不成立），在数值上意味着 gmsh 报 "intersections in the 1D mesh" 然后
-    **直接 abort 整个进程**（gmsh 4.9.5 的致命错误是 C++ throw，Python 侧拦不住）。
-    所以 :func:`build_mesh` 会先用它拦一道。
+# 每条优化边界"撞上对称轴"的判据：ex 端点落在 y 轴上，所以看 x 分量；
+# in 端点落在 x 轴上，看 y 分量。
+_AXIS_COMPONENT = {"ex": 0, "in": 1}
+
+
+def _curve_arrays(dofs, geometry, layout):
+    in_P, in_V, ex_P, ex_V = bezier_curves(dofs, geometry, layout)
+    return {"ex": (ex_P, ex_V), "in": (in_P, in_V)}
+
+
+def axis_crossings(dofs, geometry, layout, n_samples=20001):
+    """每条优化边界**首次撞上对称轴**的参数 ``t*``；没撞上则对应值为 ``None``。
+
+    端点是按构造落在轴上的，所以这里只找"内部"的过零：曲线出去又回来才会
+    出现符号变化。一旦出现，说明壁面与它自己的镜像**相交**，中间会夹出一个
+    退化的空气透镜——二维里它表现为几个退化的针状单元，三维 slab 里就是一条
+    贯穿的漏光通道。所以这是硬约束，不是罚项。
     """
     import Bezier
 
-    in_P, in_V, ex_P, ex_V = bezier_curves(dofs, geometry, layout)
-    t = np.linspace(0.0, layout.n_ctrl + 1, n_samples)
-    ex = Bezier.Bezier_interp(ex_P, ex_V, t.copy(), 0)
-    inn = Bezier.Bezier_interp(in_P, in_V, t.copy(), 0)
+    n = layout.n_ctrl + 1
+    t = np.linspace(0.0, n, n_samples)
+    out = {}
+    for name, (P, V) in _curve_arrays(dofs, geometry, layout).items():
+        c = Bezier.Bezier_interp(P, V, t.copy(), 0)[:, _AXIS_COMPONENT[name]]
+        signs = np.signbit(c)
+        idx = np.flatnonzero(np.diff(signs) != 0)
+        out[name] = None if idx.size == 0 else float(t[idx[0]])
+    return out
+
+
+def end_axis_alignment(dofs, geometry, layout):
+    """两条边界的轴端切向与对称轴的内积**绝对值**，即"近相切"程度。
+
+    返回 ``(in_align, ex_align)``：0 = 垂直于轴（最理想），1 = 沿轴（刀锋）。
+    θ 是设计变量，所以这个量只是 ``dofs[1]`` / ``dofs[2*n_ctrl+3]`` 的函数，
+    导数可以解析写出（见 :func:`end_axis_alignment_grad`）。
+    """
+    n = layout.n_ctrl
+    theta_in, theta_ex = float(dofs[1]), float(dofs[2 * n + 3])
+    # in 曲线的端点在 **x 轴**上（内积 = cos θ），ex 曲线在 **y 轴**上（内积 = sin θ）
+    return abs(cos(theta_in)), abs(sin(theta_ex))
+
+
+def end_axis_alignment_grad(dofs, geometry, layout):
+    """:func:`end_axis_alignment` 对 dofs 的解析导数（只有两个非零分量）。"""
+    n = layout.n_ctrl
+    theta_in, theta_ex = float(dofs[1]), float(dofs[2 * n + 3])
+    g = np.zeros(layout.size)
+    g[1] = -np.sign(cos(theta_in)) * sin(theta_in)       # d|cos θ_in|/dθ
+    g[2 * n + 3] = np.sign(sin(theta_ex)) * cos(theta_ex)  # d|sin θ_ex|/dθ
+    return g
+
+
+def _arclen_resample(pts, n):
+    """按归一化弧长把折线重采样成 ``n`` 个点（用于"点对点"的曲线距离）。"""
+    d = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    if d[-1] <= 0.0:
+        return np.repeat(pts[:1], n, axis=0)
+    s = np.linspace(0.0, d[-1], n)
+    return np.column_stack([np.interp(s, d, pts[:, 0]),
+                            np.interp(s, d, pts[:, 1])])
+
+
+def truncate_and_refit(dofs, geometry, layout, name=None, n_samples=400):
+    """把越过对称轴的那一段截掉，并用**同样多的设计变量**重新拟合。
+
+    规则（和 ``build_mesh`` / ``optimizer`` 的分工一致）：
+
+    1. 找到首次越轴的参数 ``t*``（:func:`axis_crossings`）；
+    2. 截断点由原曲线给出，轴端切向也**取原曲线在该处的切向**（转成 θ 存回
+       dof），所以截断不改变交界处的走向；
+    3. 轴端位置、固定锚点、内点个数都保持不变，用 L-BFGS-B 最小化"新曲线与
+       保留弧段按弧长对应的点对点距离"——这比均匀重采样更贴近原形状。
+
+    返回 ``(新 dofs, info)``；``info["truncated"]`` 为 ``False`` 时 dofs 原样返回。
+    """
+    import Bezier
+    from scipy.optimize import minimize
+
+    n = layout.n_ctrl
+    n_seg = n + 1
+    crossings = axis_crossings(dofs, geometry, layout)
+    todo = [k for k in ("ex", "in") if crossings[k] is not None]
+    if name is not None:
+        todo = [k for k in todo if k == name]
+    if not todo:
+        return dofs.copy(), {"truncated": False, "t_star": {}}
+
+    new = dofs.copy()
+    info = {"truncated": True, "t_star": {}, "fit_error": {}}
+    for which in todo:
+        P, V = _curve_arrays(dofs, geometry, layout)[which]
+        comp = _AXIS_COMPONENT[which]
+        t_star = crossings[which]
+
+        # dof 切片：端点在块的第一个槽，θ 第二个，其余是内点
+        if which == "in":
+            i_end, i_theta = 0, 1
+            sl = slice(2, 2 + 2 * n)
+        else:
+            i_end, i_theta = 2 * n + 2, 2 * n + 3
+            sl = slice(2 * n + 4, 2 * n + 4 + 2 * n)
+
+        s = np.linspace(0.0, t_star, 4000)
+        kept = Bezier.Bezier_interp(P, V, s.copy(), 0)
+        target = _arclen_resample(kept, n_samples)
+
+        # 轴端位置：保留弧段的终点（把轴坐标精确置零）
+        end = kept[-1].copy()
+        end[comp] = 0.0
+        # 轴端切向：原曲线在 t* 处的导数方向 → θ。取离原 θ 最近的 2π 等价类，
+        # 避免 atan2 的分支让 θ 突然跳 2π（切向只看方向，但历史里 θ 是连续坐标）。
+        d_end = Bezier.Bezier_interp(P, V, np.array([t_star]), 1)[0]
+        theta = float(atan2(d_end[1], d_end[0]))
+        theta += 2.0 * pi * round((float(dofs[i_theta]) - theta) / (2.0 * pi))
+        new[i_end] = float(end[0] if which == "in" else end[1])
+        new[i_theta] = theta
+
+        # 初值：沿保留弧段按弧长均匀取内点（已经离最优很近）
+        inner = _arclen_resample(kept, n + 2)[1:-1]
+
+        def residuals(x):
+            trial = new.copy()
+            trial[sl] = x
+            P2, V2 = _curve_arrays(trial, geometry, layout)[which]
+            tt = np.linspace(0.0, n_seg, 2001)
+            pts = Bezier.Bezier_interp(P2, V2, tt.copy(), 0)
+            return (_arclen_resample(pts, n_samples) - target).ravel()
+
+        res = minimize(lambda x: np.sum(residuals(x) ** 2), inner.ravel(),
+                       method="L-BFGS-B",
+                       options=dict(maxiter=200, ftol=1e-14, gtol=1e-12))
+        new[sl] = res.x
+        info["t_star"][which] = t_star
+        info["fit_error"][which] = float(np.sqrt(res.fun / n_samples))
+    return new, info
+
+
+def mesh_quality(mesh_file, subdomain=None):
+    """每个三角形单元的**形状质量**（1 = 等边，0 = 退化）。
+
+    二阶三角形按三个角节点算面积，用 ``4A/(√3·l_max²)``：这是"最短/最长边"式
+    质量因子的一种，对狭长的针状单元很敏感。曲边单元的实际面积会略大，但作为
+    **相对**判据足够了。
+    """
+    import meshio
+
+    mesh = meshio.read(mesh_file)
+    areas, quals, centres = [], [], []
+    for block, tags in zip(mesh.cells, mesh.cell_data.get("gmsh:physical", [])):
+        if block.type not in ("triangle", "triangle6"):
+            continue
+        cells = np.asarray(block.data)
+        tags = np.abs(np.asarray(tags)).ravel()
+        if subdomain is not None:
+            cells, tags = cells[tags == subdomain], tags[tags == subdomain]
+        if len(cells) == 0:
+            continue
+        p = mesh.points[cells][:, :3, :2]
+        a = 0.5 * np.abs((p[:, 1, 0] - p[:, 0, 0]) * (p[:, 2, 1] - p[:, 0, 1])
+                         - (p[:, 1, 1] - p[:, 0, 1]) * (p[:, 2, 0] - p[:, 0, 0]))
+        edges = [np.linalg.norm(p[:, 1] - p[:, 0], axis=1),
+                 np.linalg.norm(p[:, 2] - p[:, 1], axis=1),
+                 np.linalg.norm(p[:, 0] - p[:, 2], axis=1)]
+        lmax = np.maximum.reduce(edges)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            q = np.where(lmax > 0, 4.0 * a / (sqrt(3.0) * lmax ** 2), 0.0)
+        areas.append(a)
+        quals.append(q)
+        centres.append(p.mean(axis=1))
     return {
-        "ex_min_x": float(ex[:, 0].min()),
-        "ex_min_y": float(ex[:, 1].min()),
-        "in_min_x": float(inn[:, 0].min()),
-        "in_min_y": float(inn[:, 1].min()),
+        "quality": np.concatenate(quals) if quals else np.array([]),
+        "area": np.concatenate(areas) if areas else np.array([]),
+        "centres": np.concatenate(centres) if centres else np.zeros((0, 2)),
     }
 
 
@@ -371,7 +535,31 @@ def _backward(curves):
     return [-c for c in reversed(curves)]
 
 
-def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves):
+def _refine_blobs(report, h_floor):
+    """坏单元 → 局部加密用的 Box 参数 ``(x, y, h_in, 过渡半径)``。
+
+    单元自身的边长取 ``√(2A)``；边长已经远小于目标值的单元是**几何退化**
+    （针状单元），加密救不了，直接跳过——这一条是为了不把预算浪费在切触缺陷上。
+    """
+    q, area, centres = report["quality"], report["area"], report["centres"]
+    bad = np.flatnonzero(q < QUALITY_MIN)
+    if bad.size == 0:
+        return []
+    order = bad[np.argsort(q[bad])][:32]          # 最多 32 个 blob，最差的优先
+    blobs = []
+    for k in order:
+        h_loc = sqrt(2.0 * max(area[k], 0.0))
+        if h_loc <= 0.2 * h_floor:                # 几何退化，细化没有意义
+            continue
+        h_loc = min(h_loc, 8.0 * h_floor)
+        h_in = max(QUALITY_BLOB_FACTOR * h_loc, 0.25 * h_floor)
+        radius = max((h_loc - h_in) / (SIZE_GROWTH - 1.0), h_in)
+        blobs.append((float(centres[k][0]), float(centres[k][1]), h_in,
+                      max(h_loc, h_floor), radius))
+    return blobs
+
+
+def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves, blobs=()):
     """把目标边长交给 gmsh 的背景尺寸场。
 
     端口处 ``PORT_SIZE``，沿距离 ``GRADE_LEN`` 过渡到介质内部的目标尺寸
@@ -412,12 +600,25 @@ def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves):
     F.setNumber(port_field, "InField", port_value)
     F.setNumbers(port_field, "CurvesList", [int(c._id) for c in port_curves])
 
+    fields = [threshold(sizes["h_wg"], surfaces_wg),
+              threshold(sizes["h_air"], surfaces_air),
+              port_field]
+    for (bx, by, h_in, h_far, radius) in blobs:
+        # 光滑的"尺寸凹陷"：h(r) = h_far - (h_far - h_in)·exp(-(r/σ)²)，再对 h_far
+        # 取 min 保证不会把别处也变小。
+        #
+        # 为什么不用 Box 场：Box 的 VOut 必须给得很小才有过渡，但那样它会成为
+        # 全局上限（把包层的 0.04 压到 0.01，单元数翻倍）；给 1e22 又退化成台阶，
+        # 台阶边缘照样制造新的坏单元——两种都实测过，都是反效果。
+        sigma2 = max(radius, h_far) ** 2
+        tag = F.add("MathEval")
+        F.setString(tag, "F",
+                    "min(%.12g, %.12g - %.12g*exp(-((x-%.12g)^2+(y-%.12g)^2)/%.12g))"
+                    % (h_far, h_far, h_far - h_in, bx, by, sigma2))
+        fields.append(tag)
+
     combined = F.add("Min")
-    F.setNumbers(combined, "FieldsList", [
-        threshold(sizes["h_wg"], surfaces_wg),
-        threshold(sizes["h_air"], surfaces_air),
-        port_field,
-    ])
+    F.setNumbers(combined, "FieldsList", fields)
     F.setAsBackgroundMesh(combined)
 
     # 只让尺寸场决定单元大小：不要点尺寸、不要边界外插、不要曲率加密
@@ -442,16 +643,17 @@ def build_mesh(case):
     g = case.geometry
     sizes = mesh_sizes(case)
 
-    # 越界检查必须放在 gmsh 之前：越界的几何会让 gmsh 直接 abort 掉进程
-    margins = geometry_margins(case.dofs, g, case.layout)
-    tol = GEOMETRY_TOL_FACTOR * sizes["h_wg"]
-    worst = min(margins.values())
-    if worst < -tol:
+    # 越轴检查必须放在 gmsh 之前：越界的几何会让 gmsh 直接 abort 掉进程。
+    # 处理方式是调用方（optimizer / make_mesh）用 design.truncate_and_refit()
+    # 修好再进来，这里只负责拒绝。
+    crossings = axis_crossings(case.dofs, g, case.layout)
+    hit = {k: v for k, v in crossings.items() if v is not None}
+    if hit:
         raise ValueError(
-            "优化边界越出了对称轴（%s，最深处 %.2e，允许 %.2e）。四个象限是镜像"
-            "出来的，越界会让相邻象限的曲线真的相交；gmsh 遇到这种几何会直接"
-            " abort 整个进程，所以这里先拦下来。"
-            % ({k: round(v, 6) for k, v in margins.items()}, worst, tol))
+            "优化边界越过了对称轴（%s）。越轴会让壁面与自己的镜像相交，夹出退化"
+            "的空气透镜（三维里是贯穿的漏光通道），gmsh 遇到这种几何会直接"
+            " abort 整个进程。请先 design.truncate_and_refit() 截断重拟合。"
+            % {k: round(v, 4) for k, v in hit.items()})
 
     in_polys, ex_polys = bezier_polygons(case.dofs, g, case.layout)
 
@@ -619,17 +821,41 @@ def build_mesh(case):
                    + input_bd_mxy + port_mxy_air3 + port_mxy_air4
                    + input_bd_mx + port_mx_air1 + port_mx_air4
                    + input_bd_my + port_my_air2 + port_my_air3)
-    _apply_size_field(sizes, [wg1, wg2, wg3, wg4], [air1, air2, air3, air4],
-                      port_curves)
-
-    model.generate_mesh(dim=2, order=2)
     # 写 MSH 2.2 而不是默认的 4.1：libMesh 1.9 读 4.x 时会校验 $Entities 里
     # 每条 curve 的包围盒，而 gmsh 4.9.5 给**曲边**算的包围盒比真实曲线小
     # 一点点（实测 5.5e-6，而 libMesh 的相对容差只有 1e-8 量级），于是读网格
     # 直接报 "outside entity physical bounding box"。2.2 没有 $Entities 段，
     # physical tag / $PhysicalNames 一样保留。
     gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
-    gmsh.write(case.mesh_file)
+
+    # 生成 → 质量门 → 局部加密（最多 QUALITY_MAX_ROUNDS 轮）。
+    # 质量门的目的是**有限元精度**；几何切触造成的退化单元不归它管（
+    # _refine_blobs 会跳过那些"边长已经远小于目标值"的单元）。
+    wg_surfaces = [wg1, wg2, wg3, wg4]
+    air_surfaces = [air1, air2, air3, air4]
+    blobs = ()
+    quality = None
+    for attempt in range(QUALITY_MAX_ROUNDS + 1):
+        _apply_size_field(sizes, wg_surfaces, air_surfaces, port_curves, blobs)
+        model.generate_mesh(dim=2, order=2)
+        gmsh.write(case.mesh_file)
+        if attempt == QUALITY_MAX_ROUNDS:
+            break
+        quality = mesh_quality(case.mesh_file)
+        blobs = tuple(_refine_blobs(quality, sizes["h_wg"]))
+        if not blobs:
+            break
+        print("[mesh] 第 %d 轮: %d 个单元 q < %.2f，局部加密 %d 处后重建"
+              % (attempt + 1, int((quality["quality"] < QUALITY_MIN).sum()),
+                 QUALITY_MIN, len(blobs)))
+    if quality is None:
+        quality = mesh_quality(case.mesh_file)
+    case.mesh_quality = quality["quality"]
+    if len(case.mesh_quality) and case.mesh_quality.min() < QUALITY_MIN:
+        print("[mesh] 警告: q_min = %.4f < %.2f（%d 个单元）。这通常意味着几何"
+              "退化（针状单元），不是分辨率不够——加密救不了。"
+              % (case.mesh_quality.min(), QUALITY_MIN,
+                 int((case.mesh_quality < QUALITY_MIN).sum())))
 
     # 记下数字 id：求解器优先用它们，就不再依赖 physical name
     by_name = {gmsh.model.getPhysicalName(dim, tag): tag

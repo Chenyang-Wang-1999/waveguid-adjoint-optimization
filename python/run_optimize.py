@@ -17,4 +17,4 @@ def main(**kwargs):
 
 
 if __name__ == "__main__":
-    main(iterations=40, alpha0=1e-5)
+    main(iterations=100, alpha0=1e-3)

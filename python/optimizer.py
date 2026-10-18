@@ -13,6 +13,11 @@ import design
 import physics as physics_mod
 import solver
 
+# 端点切向"近相切"的惩罚系数。目标函数 |S1|^2 的量级是 ~0.8，端点角的物理
+# 灵敏度实测 ≈ 0（1e-4 量级），所以这个权重不会被物理项抵消；它把 θ 轻轻推向
+# "垂直于对称轴"（=0 内积），避免壁面在轴附近退化成刀锋。
+END_PENALTY = 0.05
+
 SENS_CSV = "sens_list.csv"
 SPARAM_CSV = "S_params_list.csv"
 DOF_CSV = "DOF_list.csv"
@@ -34,17 +39,44 @@ def last_dofs(path=DOF_CSV):
     return arr[-1, :]
 
 
-def dof_derivative(case):
-    """一次伴随求解，返回 ``(-d|S1|^2/dDOF, S_params)``。
+def penalty(case):
+    """端点切向与对称轴的内积绝对值之和（越小越好，0 = 垂直穿过轴）。
 
-    符号约定沿用旧实现：``gradient_descent`` 里是 ``DOF += sens * alpha``，
-    也就是对 |S1|^2 做梯度上升。
+    只用两条边界的 θ 设计变量，所以导数可以解析给出
+    （:func:`design.end_axis_alignment_grad`），不需要额外求解。
     """
+    a = design.end_axis_alignment(case.dofs, case.geometry, case.layout)
+    return float(a[0] + a[1])
+
+
+def repair(case):
+    """越轴检测 + 截断重拟合；返回是否发生了截断。"""
+    crossings = design.axis_crossings(case.dofs, case.geometry, case.layout)
+    hit = {k: v for k, v in crossings.items() if v is not None}
+    if not hit:
+        return False
+    case.dofs, info = design.truncate_and_refit(
+        case.dofs, case.geometry, case.layout)
+    print("[geom] 越轴（%s）→ 已在 t*=%s 处截断重拟合，拟合残差 %s"
+          % ({k: round(v, 3) for k, v in hit.items()},
+             {k: round(v, 3) for k, v in info["t_star"].items()},
+             {k: "%.1e" % v for k, v in info["fit_error"].items()}))
+    return True
+
+
+def dof_derivative(case):
+    """一次伴随求解，返回 ``(dJ/dDOF, S_params)``，其中 ``J = |S1|^2 - λ·P``。
+
+    ``P`` 是端点切向的"近相切"惩罚（:func:`penalty`）。符号约定：优化循环里是
+    ``DOF += sens * alpha``，也就是对 ``J`` 做梯度上升。
+    """
+    repair(case)
     design.make_case(case.dofs, case.physics, case.geometry, case.name)
     result = solver.run(case)
     S = result["S_params"]
     sens = design.sensitivity_to_dofs(result["sens_ex"], result["sens_in"])
-    return -sens.flatten(), S.flatten()
+    g_pen = design.end_axis_alignment_grad(case.dofs, case.geometry, case.layout)
+    return -sens.flatten() - END_PENALTY * g_pen, S.flatten()
 
 
 def _truncate_logs():
@@ -69,7 +101,8 @@ def gradient_descent(derivative, case, alpha, iterations=10):
         case.dofs[case.dofs < 0.0] = 0.0
 
         sens, S = derivative(case)
-        print("Transmission:", np.abs(S[1]) ** 2)
+        print("Transmission: %.6f   penalty: %.4f"
+              % (np.abs(S[1]) ** 2, penalty(case)))
         _append_logs(case.dofs, sens, S)
 
 

@@ -277,4 +277,4 @@ if __name__ == "__main__":
     # 网格按 label 上色（快，只读文件、不跑求解器）
     plot_mesh(cs.mesh_file, centerlines=True,
               title="cross_waveguide: coloured by physical group")
-    visualization(cs)
+    # visualization(cs)
