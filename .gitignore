@@ -12,10 +12,7 @@ waveguide_optimization/waveguide_optimization.exe
 config.mk
 
 # ---- 运行产物 ----------------------------------------------------------
-data/out_*.msh
-data/*_result.mat
-data/*_list.csv
-data/*.log
+data
 output/
 
 # ---- Python ------------------------------------------------------------

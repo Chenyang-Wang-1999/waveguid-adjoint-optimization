@@ -1,8 +1,8 @@
 #include "2D_waveguide_model_params.h"
+#include "h5io.h"
 #include <Eigen/Core>
 #include <libmesh/getpot.h>
 #include <string.h>
-#include <MATio>
 #include <math.h>
 #include <iostream>
 
@@ -12,7 +12,8 @@ WaveguideParams::WaveguideParams(std::string getpot_filename)
 {
     // read getpot
     GetPot input_file(getpot_filename);
-    mat_file = input_file("mat_file",std::string());
+    design_file = input_file("design_file",std::string("design.h5"));
+    result_file = input_file("result_file",std::string("result.h5"));
     mesh_file = input_file("mesh_file",std::string());
     out_mesh_file = input_file("out_mesh_file",std::string());
     // n_port = input_file("n_port",0);
@@ -25,23 +26,22 @@ WaveguideParams::WaveguideParams(std::string getpot_filename)
 
 
 
-    // open mat
-    matio::MatioFile matfp(mat_file);
-    matfp.read_mat(port_analytic_varname.data(), port_analytic);
-
-    matfp.read_mat(port_id_varname.data(), port_id);
-
-    matfp.read_mat(port_coords_varname.data(), port_coords);
-    matfp.read_mat(port_other_params_varname.data(), port_other_params);
-    matfp.read_mat(port_x_axis_varname.data(), port_x_axis);
-    matfp.read_mat(port_incidence_on_varname.data(), port_incidence_on);
-    matfp.close();
+    // 端口表来自 design.h5
+    {
+        h5io::File design(design_file, false);
+        const std::string base = "ports/";
+        port_analytic = h5io::read_matrix_int(design.id(), base + port_analytic_varname).row(0);
+        port_id = h5io::read_matrix_int(design.id(), base + port_id_varname).row(0);
+        port_coords = h5io::read_matrix(design.id(), base + port_coords_varname);
+        port_other_params = h5io::read_matrix(design.id(), base + port_other_params_varname);
+        port_x_axis = h5io::read_matrix(design.id(), base + port_x_axis_varname);
+        port_incidence_on = h5io::read_matrix_int(design.id(), base + port_incidence_on_varname).row(0);
+    }
 
     n_port = port_id.size();
 
     #ifdef DEBUG
         std::cout << port_id_varname.data() <<'\n';
-        std::cout << mat_file <<'\n';
         std::cout << port_coords << '\n';
         std::cout << "port_id:" << port_id << '\n';
         std::cout << "port_incidence_on:" << port_incidence_on << '\n';

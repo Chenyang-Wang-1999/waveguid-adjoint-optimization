@@ -11,6 +11,23 @@
 解一次伴随问题，就拿到目标函数对*全部*控制点坐标的梯度，然后做梯度下降。
 优化前的透射率为 $|S_(21)|^2 = 0.712$，优化后达到 $approx 0.96$。
 
+#note[
+  本文写于 2022 年，正文里提到的 Python 模块名是**当时**的布局。
+  2025 年做了一次模块重构，对应关系如下（详见 `../overview.typ`）：
+
+  #table(
+    columns: (auto, auto),
+    stroke: none,
+    inset: (x: 0.5em, y: 0.3em),
+    [`original_mesh.py`], [`design.py` + `make_mesh.py`],
+    [`optimize.py`], [`optimizer.py` + `run_optimize.py`],
+    [`propagation_constant0.py`], [`physics.py`],
+    [`test_sensitivity.py`], [`tests/test_fd_sensitivity.py`],
+  )
+
+  数据格式也从 `.mat` 换成了 `design.h5` / `result.h5`（HDF5）。
+]
+
 下面按「做什么 → 怎么做 → 结果如何 → 遇到什么问题 → 怎么解决」的顺序叙述。
 伴随法灵敏度的完整推导不在这里重复，见 `theory/05-adjoint-sensitivity.typ`。
 

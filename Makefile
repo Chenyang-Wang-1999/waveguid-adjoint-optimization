@@ -38,7 +38,7 @@ endif
 CXX      := $(shell $(LIBMESH_CONFIG) --cxx)
 CXXFLAGS := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --cxxflags) -std=gnu++17 -Wall
 CPPFLAGS := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --include)
-LIBS     := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --libs) -lmatio
+LIBS     := $(shell METHOD=$(METHOD) $(LIBMESH_CONFIG) --libs)
 INCLUDES := -I$(CURDIR)/waveguide_optimization
 
 # ---- 目标 ------------------------------------------------------------------

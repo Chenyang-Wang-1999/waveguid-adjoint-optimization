@@ -168,29 +168,32 @@ $bold(g) = 2 S overline((diff S)/(diff A))$ 与代码的逐项对应）见 `theo
   stroke: none,
   inset: (x: 0.5em, y: 0.4em),
   table.header([*文件*], [*职责*]),
-  [`original_mesh.py`], [用 Gmsh 生成交叉波导网格，解色散方程求 $beta$，把 Bézier 控制点与端口参数写进 `.mat`，并生成 `infile.pot`],
-  [`optimize.py`], [优化主循环：DOF ↔ 控制点互转、调求解器、读回灵敏度、梯度下降（也留了 scipy BFGS 的接口）],
-  [`test_sensitivity.py`], [用有限差分校核伴随灵敏度],
-  [`propagation_constant0.py`], [平板波导色散方程的牛顿迭代，含频率扫描时用上一个解当初值的技巧],
-  [`interp_DOF_to_points.py`], [把有限元自由度插值到指定点],
+  [`make_mesh.py`], [入口：生成 gmsh 网格与 `design.h5`],
+  [`run_optimize.py`], [入口：跑优化循环],
+  [`design.py`], [几何与参数：DOF ↔ Bézier 控制点、端口表、gmsh 建模（唯一产生网格的地方）],
+  [`physics.py`], [材料/频率参数与平板波导色散（求 $beta$，含频率扫描时用上一个解当初值）],
+  [`solver.py`], [求解器控制：写 `infile.pot`、调 `mpiexec`、检查退出码、读回结果],
+  [`optimizer.py`], [主优化器：目标/梯度封装 + 梯度下降],
+  [`postproc.py`], [后处理：读场、`pyvista` 可视化],
+  [`dataio.py`], [数据契约：`design.h5` / `result.h5` 的唯一读写入口],
   [`paths.py`], [统一的路径与外部命令入口，所有脚本都在 `data/` 下工作],
+  [`tests/`], [pytest：数据契约、设计变量映射、有限差分（可选）],
 )
 
 === 数据流
 
 ```text
-python/original_mesh.py                data/cross_waveguide.msh
-  ├─ gmsh 建几何 ─────────────────────► data/cross_waveguide.mat
-  ├─ 解色散方程求 β ──────────────────► data/infile.pot
-  └─ 写 Bézier 控制点                                     │
-                                                          ▼
-                            waveguide_optimization/waveguide_optimization  (C++)
-                                     │  读 .msh / .mat / .pot
-                                     ▼
-                            data/cross_waveguide_result.mat
-                                     │  S 参数 + 灵敏度
-                                     ▼
-python/optimize.py  ──►  更新控制点，回到第一步
+python/make_mesh.py                    data/cross_waveguide.msh
+  ├─ gmsh 建几何 ─────────────────────►  data/design.h5   (Bézier 控制点 + 端口表)
+  └─ 解色散方程求 β                                        │
+                                                           ▼
+                             waveguide_optimization/waveguide_optimization  (C++)
+                                      │  solver.py 写 infile.pot 并调用
+                                      ▼
+                             data/result.h5   (/scalars, /fields, /meta)
+                                      │  S 参数 + 灵敏度
+                                      ▼
+python/run_optimize.py  ──►  更新控制点，回到第一步
 ```
 
 构建与运行方式见 `build-and-run.typ`。
@@ -206,7 +209,7 @@ python/optimize.py  ──►  更新控制点，回到第一步
   [libMesh], [有限元装配、网格管理、`FEMContext`、伴随求解接口（需 `--enable-complex`）],
   [PETSc / SLEPc], [复数线性求解（直接法 LU）、本征值问题],
   [Eigen], [矩阵与向量类型],
-  [matio], [读写 MATLAB `.mat` 文件（C++ 侧）],
+  [HDF5], [前后端数据交换（`design.h5` / `result.h5`）],
   [GetPot], [解析 `infile.pot` 运行参数],
   [MPI], [libMesh 的并行基础设施，实际以单进程运行],
   [Python: gmsh / numpy / scipy / matplotlib / pybind11], [网格生成、优化循环、拟合与绘图],

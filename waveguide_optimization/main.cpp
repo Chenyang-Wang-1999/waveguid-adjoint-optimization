@@ -32,7 +32,6 @@
 // libmesh io
 
 #include <libmesh/getpot.h>
-#include <MATio>
 
 // C libraries
 #include <math.h>
@@ -51,6 +50,7 @@
 #include "EM_mesh_flagging.h"
 #include "2D_waveguide_model_params.h"
 #include "Bezier.h"
+#include "h5io.h"
 
 
 
@@ -109,23 +109,30 @@ int main(int argc, char ** argv)
     double mu_amb = infile("mu_amb", 1.0);
     double freq = infile("freq",1.0);
     unsigned int save_field = infile("save_field",0);
-    std::string result_mat_name = infile("result_mat_name",std::string());
-    subdomain_id_type id_wg = mesh.get_id_by_name("waveguide");
-    // subdomain_id_type id_input = mesh_bd.get_id_by_name("input");
-
-    // subdomain_id_type id_output1 = mesh_bd.get_id_by_name("output1");
-    // subdomain_id_type id_output21 = mesh_bd.get_id_by_name("output21");
-    subdomain_id_type id_ex_opt = mesh_bd.get_id_by_name("ex_opt");
-    subdomain_id_type id_in_opt = mesh_bd.get_id_by_name("in_opt");
+    // physical id 优先从 infile.pot 读数字（Python 写网格时记下来的）。只在键缺失
+    // 时才按 physical name 查——名字在网格格式转换/写回时容易丢，数字更可靠。
+    const int id_wg_opt = infile("id_wg", -1);
+    const int id_ex_opt_opt = infile("id_ex_opt", -1);
+    const int id_in_opt_opt = infile("id_in_opt", -1);
+    subdomain_id_type id_wg = (id_wg_opt >= 0)
+        ? static_cast<subdomain_id_type>(id_wg_opt)
+        : mesh.get_id_by_name("waveguide");
+    subdomain_id_type id_ex_opt = (id_ex_opt_opt >= 0)
+        ? static_cast<subdomain_id_type>(id_ex_opt_opt)
+        : mesh_bd.get_id_by_name("ex_opt");
+    subdomain_id_type id_in_opt = (id_in_opt_opt >= 0)
+        ? static_cast<subdomain_id_type>(id_in_opt_opt)
+        : mesh_bd.get_id_by_name("in_opt");
 
     Eigen::MatrixXd in_Bezier_P, in_Bezier_V, ex_Bezier_P, ex_Bezier_V;
-    matio::MatioFile matfp(curr_params.mat_file);
-    matfp.read_mat("in_Bezier_P", in_Bezier_P);
-    matfp.read_mat("in_Bezier_V", in_Bezier_V);
-
-    matfp.read_mat("ex_Bezier_P", ex_Bezier_P);
-    matfp.read_mat("ex_Bezier_V", ex_Bezier_V);
-    matfp.close();
+    // 设计变量（Bezier 控制点）来自设计变量 + 端口表所在的 design.h5
+    {
+        h5io::File design(curr_params.design_file, false);
+        in_Bezier_P = h5io::read_matrix(design.id(), "design/in_Bezier_P");
+        in_Bezier_V = h5io::read_matrix(design.id(), "design/in_Bezier_V");
+        ex_Bezier_P = h5io::read_matrix(design.id(), "design/ex_Bezier_P");
+        ex_Bezier_V = h5io::read_matrix(design.id(), "design/ex_Bezier_V");
+    }
 
     std::vector<subdomain_id_type> model_domain_id = {id_wg};
     std::vector<double> model_index = {1.0/(8*freq/8)> sqrt(epsilon_wg) ? 1.0/(8*freq/8): sqrt(epsilon_wg)};
@@ -288,49 +295,56 @@ int main(int argc, char ** argv)
     processor_id_type curr_id = mesh.processor_id();
 
     static Eigen::VectorXcd sol(eq_systems.get_system("waveguide").n_dofs());
-    std::stringstream varname_stream;
-    varname_stream << "Ez_" << curr_id;
-    std::string varname = varname_stream.str();
     if(save_field)
     {
-        // sol.setZero();
+        // get_data_vec 只填本进程"拥有"的节点，其余留 0（支撑集互不重叠），
+        // 所以下面按节点求和就能拼出全局向量。
         get_data_vec(eq_systems.get_system("waveguide"), &sol, Ez_id);
-
     }
 
-
-
-
-    std::stringstream integrate_stream;
-    integrate_stream << "S_params_" << curr_id;
-    std::string integrate_name = integrate_stream.str();
-    // Output
-    for(unsigned int i = 0; i < mesh.n_processors(); i++)
+    // ---- 归约各 rank 的局部量 ----------------------------------------------
+    // 每个 rank 只算了自己那部分：
+    //   * S_params：integrate_along_side 只遍历 active_local_element_ptr_range，
+    //     拿到的是局部单元积分，必须求和；
+    //   * 场 sol：如上，各 rank 的支撑集互不重叠，求和即"拼接"。
+    // 在 C++ 侧归约之后，result.h5 里就是单一数据集，读取方不必再猜"要不要
+    // 求和"——那个语义属于产生数据的一侧。
     {
-        // save to mat file
-        // std::cout << "i: "<<i << "current_id: " << curr_id << '\n';
-        if(i == curr_id)
-        {
-            matio::MatioFile matfp(result_mat_name);
-            if(save_field)
-            {
-                matfp.write_mat(varname.data(), sol,true);
-            }
-            matfp.write_mat(integrate_name.data(), S_params, true);
-            matfp.close();
-        }
-        // MPI_Barrier(init.comm().get());
-        MPI_Barrier(MPI_COMM_WORLD);
+        std::vector<std::complex<double>> s(S_params.data(),
+                                            S_params.data() + S_params.size());
+        mesh.comm().sum(s);
+        S_params = Eigen::Map<Eigen::VectorXcd>(s.data(), (Eigen::Index)s.size());
     }
+    if(save_field)
+    {
+        std::vector<std::complex<double>> ez(sol.data(), sol.data() + sol.size());
+        mesh.comm().sum(ez);
+        sol = Eigen::Map<Eigen::VectorXcd>(ez.data(), (Eigen::Index)ez.size());
+    }
+
+    // ---- 结果输出 ----------------------------------------------------------
+    // 归约后全局量都在，只需要 rank 0 写一次；不再需要按 rank 轮流打开文件。
     if(curr_id == 0)
     {
-        matio::MatioFile matfp(result_mat_name);
-        Eigen::VectorXi N_processor(1);
-        N_processor(0) = mesh.n_processors();
-        matfp.write_mat("N_process", N_processor, true);
-        matfp.write_mat("ex_opt_sens", ex_opt_sens, true);
-        matfp.write_mat("in_opt_sens", in_opt_sens, true);
-        matfp.close();
+        h5io::File f(curr_params.result_file, true); // 创建并清空
+        h5io::Group meta(f.id(), "meta");
+        h5io::set_attr(meta.id(), "format_version", h5io::FORMAT_VERSION);
+        h5io::set_attr(meta.id(), "n_process", (int)mesh.n_processors());
+        h5io::set_attr(meta.id(), "freq", freq);
+        h5io::set_attr(meta.id(), "epsilon_wg", epsilon_wg);
+        h5io::set_attr(meta.id(), "epsilon_amb", epsilon_air);
+        h5io::set_attr(meta.id(), "save_field", (int)save_field);
+        h5io::set_attr(meta.id(), "libmesh_version", LIBMESH_VERSION);
+
+        h5io::Group sc(f.id(), "scalars");
+        h5io::write_complex_vector(sc.id(), "S_params", S_params);
+        h5io::write_matrix(sc.id(), "ex_opt_sens", ex_opt_sens);
+        h5io::write_matrix(sc.id(), "in_opt_sens", in_opt_sens);
+        if(save_field)
+        {
+            h5io::Group fl(f.id(), "fields");
+            h5io::write_complex_vector(fl.id(), "Ez", sol);
+        }
     }
     // MPI_Finalize();
     return 0;

@@ -17,6 +17,7 @@
 
 import os
 import shutil
+import subprocess
 
 PYTHON_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(PYTHON_DIR)
@@ -38,13 +39,17 @@ def chdir_data():
 
 
 def solver_command(extra_args="-pc_type lu"):
-    """拼出调用求解器的完整命令行。"""
-    cmd = "%s -n 1 %s" % (MPIEXEC, SOLVER)
+    """拼出调用求解器的完整命令行（argv 列表，便于安全传递参数）。"""
+    cmd = [MPIEXEC, "-n", "1", SOLVER]
     if extra_args:
-        cmd += " " + extra_args
+        cmd += extra_args.split() if isinstance(extra_args, str) else list(extra_args)
     return cmd
 
 
 def run_solver(extra_args="-pc_type lu"):
-    """调用有限元求解器，返回 shell 退出码。"""
-    return os.system(solver_command(extra_args))
+    """调用有限元求解器，返回退出码（0 表示成功）。
+
+    返回的是真正的进程退出码，调用方应当检查它：求解器崩溃时如果继续去读
+    上一次的结果文件，会拿到**旧的灵敏度**而不报错。
+    """
+    return subprocess.run(solver_command(extra_args)).returncode

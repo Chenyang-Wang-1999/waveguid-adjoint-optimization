@@ -15,7 +15,8 @@ class WaveguideParams
 {
 public:
     WaveguideParams(std::string getpot_filename);
-    std::string mat_file; // .mat file
+    std::string design_file; // design.h5：Bezier 控制点 + 端口表（新格式）
+    std::string result_file; // result.h5：求解结果（新格式）
     std::string mesh_file; //.msh file
     std::string out_mesh_file; //output mesh file
     int n_port; // number of ports

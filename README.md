@@ -22,13 +22,17 @@
 │   ├── EM_mesh_flagging.{h,cpp}            按频率与折射率自适应加密网格
 │   ├── Bezier.{h,cpp}                      Bézier 求值/插值/最近点/控制点灵敏度
 │   └── TriDiagonal.h                       三对角求解（Thomas 算法）
-├── python/                     Python 侧
-│   ├── original_mesh.py        Gmsh 生成交叉波导网格，写出 .msh/.mat/infile.pot
-│   ├── optimize.py             优化主循环：DOF ↔ 控制点互转、调求解器、梯度下降
-│   ├── test_sensitivity.py     有限差分校核伴随灵敏度
-│   ├── propagation_constant0.py 平板波导色散方程的牛顿迭代
-│   ├── interp_DOF_to_points.py  把有限元自由度插值到指定点
-│   └── paths.py                统一的路径/命令入口
+├── python/                     Python 侧（扁平模块，数据契约集中在一个文件里）
+│   ├── make_mesh.py            入口：生成 gmsh 网格 + design.h5
+│   ├── run_optimize.py         入口：跑优化循环
+│   ├── design.py               几何与参数：DOF↔Bézier 控制点、端口表、gmsh 建模
+│   ├── physics.py              材料/频率参数与平板波导色散（求 β）
+│   ├── solver.py               求解器控制：写 infile.pot、调 mpiexec、校验、读结果
+│   ├── optimizer.py            主优化器：目标/梯度封装 + 梯度下降
+│   ├── postproc.py             后处理：读场、pyvista 可视化
+│   ├── dataio.py               数据契约：design.h5 / result.h5
+│   ├── paths.py                统一的路径/命令入口
+│   └── tests/                  pytest：数据契约、设计变量映射、有限差分（可选）
 ├── data/                       运行输入（infile.pot、cross_waveguide.msh/.mat）
 ├── docs/                       Typst 文档（理论、构建与运行、结果）
 ├── Makefile
@@ -43,7 +47,7 @@
 | libMesh（≥1.6，需 `--enable-complex`） | 有限元装配、网格、FEMContext、伴随求解接口 |
 | PETSc / SLEPc | 复数线性求解（直接法 LU）、本征值问题 |
 | Eigen | 矩阵与向量类型 |
-| matio | 读写 MATLAB `.mat`（C++ 侧） |
+| HDF5 | 前后端数据交换（`design.h5` / `result.h5`，经 `libmesh-config` 已在链接项里） |
 | GetPot | 解析 `infile.pot`（libMesh 自带） |
 | MPI | libMesh 的并行基础设施，实际以单进程运行 |
 | Python: gmsh / pygmsh / pyvista / numpy / scipy / matplotlib / pybind11 | 网格生成、优化循环、绘图 |
@@ -60,9 +64,10 @@ make                 # 等价于 make METHOD=opt；也可以 make METHOD=dbg
 # 2) 跑一次正问题（在 data/ 里读写，输出文件已被 .gitignore 忽略）
 make run
 
-# 3) 编译 Python 用的 Bézier 扩展模块，然后跑优化循环
+# 3) 编译 Python 用的 Bézier 扩展模块，然后生成算例 / 跑优化循环
 make python
-cd data && python3 ../python/optimize.py
+python3 python/make_mesh.py          # 生成 data/cross_waveguide.msh + design.h5
+cd data && python3 ../python/run_optimize.py
 ```
 
 `make run` 的典型输出：
@@ -73,14 +78,19 @@ Id of Ez: 0
 end point mode:0
 ```
 
-产物是 `data/cross_waveguide_result.mat`，里面含
+产物是 `data/result.h5`（HDF5，h5py 直接读），含
 
-| 键 | 含义 |
+| 数据集 | 含义 |
 |---|---|
-| `S_params_0` | 四个端口的 S 参数（复数） |
-| `ex_opt_sens` / `in_opt_sens` | 目标函数对两条优化边界控制点坐标的灵敏度 |
-| `Ez_0` | 电场自由度（`infile.pot` 里 `save_field = 1` 时才写） |
-| `N_process` | MPI 进程数 |
+| `/scalars/S_params` | 四个端口的 S 参数（复数，存成 `(n,2)` + 属性 `complex=1`） |
+| `/scalars/ex_opt_sens` / `in_opt_sens` | 目标函数对两条优化边界控制点坐标的灵敏度 |
+| `/fields/Ez` | 电场自由度（`infile.pot` 里 `save_field = 1` 时才写） |
+| `/meta` | 属性：`format_version` / `n_process` / `freq` / `epsilon_*` 等 |
+
+各 rank 的局部量（S 参数的单元积分、按节点拼出的场）在 **C++ 侧用 MPI 归约**
+后再由 rank 0 写出，所以文件里一律是全局量。几何输入在同一个目录的
+`design.h5`（设计变量 + Bézier 控制点 + 端口表 + 完整物理/几何参数）——它是自描述的，
+`design.Case.load()` 只靠这一个文件就能还原出整个算例。
 
 `data/infile.pot` 是求解器的全部运行参数（频率、介电常数、端口、Bézier 端点模式等），
 格式是 GetPot。
@@ -104,7 +114,9 @@ $ (diff W)/(diff p) = - Re( overline(bold(a))^T (diff bold(K))/(diff p) bold(a) 
 
 代价对比：有限差分需要 $N + 1$ 次线性求解，伴随法只要 2 次（正问题 + 伴随）。
 
-**验证。** `python/test_sensitivity.py` 用随机扰动设计变量、比较有限差分与伴随梯度。
+**验证。** `python/tests/test_fd_sensitivity.py` 用随机扰动设计变量、比较有限差分与伴随梯度
+（默认跳过，`WAVEGUIDE_FD_TEST=1` 才跑）。目前只校验方向：伴随梯度与有限差分同号，
+但两者量级差一个随方向变化的因子（0.25 ~ 1.05），见该文件顶部说明。
 
 ## 结果
 
