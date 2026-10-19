@@ -34,8 +34,21 @@ PORT_SIZE = 0.0037       # 端口曲线（input/output*）上的目标边长。S
                          # 积分出来的，这里的密度直接影响积分精度，所以刻意给得
                          # 比内部细得多。
 WL_PER_SIZE = 16         # 介质内部：目标边长 ≤ 介质内波长 / WL_PER_SIZE
-GRADE_LEN = 0.025        # 从端口尺寸过渡到内部尺寸的距离
+GRADE_LEN = 0.025        # 端口 → 内部尺寸的过渡距离。全场唯一**不**服从
+                         # SIZE_GROWTH 的地方：端口一维网格钉在 PORT_SIZE，按
+                         # 1.3 倍过渡要 0.12 的距离，实测单元数 7.4k → 10.1k。
+                         # 想严格全局服从，把 _apply_size_field 里的 DistMax 换成
+                         # _growth_len(sizes["h_port"], size_max)。
 DISTANCE_SAMPLING = 200  # Distance 场每条曲线的采样点数
+
+# 增长率。gmsh 没有"全局最大增长率"这种钳制——尺寸场是逐点求值的纯函数，
+# 增长只能自己写成锥面：h(d) = h_src + (SIZE_GROWTH - 1) * d，d 是到细源的
+# 距离（见 _growth_len）。锥面在 d 处恰好允许相邻单元放大 SIZE_GROWTH 倍，
+# 多条锥面取 Min 就是"每单元最多涨 SIZE_GROWTH 倍"。见 _apply_size_field。
+SIZE_GROWTH = 1.3        # 界面锥面用它反解过渡长度；局部加密（_refine_blobs）
+                         # 也用它算高斯凹陷的半径。
+IFACE_GRADING = True     # 波导壁 → 空气是否走锥面。False 退回旧行为：空气一离开
+                         # 界面就直接用 h_air（实测邻接尺寸比可到 2.5）。
 
 # 网格质量门与局部加密（见 mesh_quality / build_mesh）。标定依据：初始直线设计
 # 的网格 q_min = 0.235，而越轴设计会出现 q ≈ 1e-4 的针状单元。
@@ -45,7 +58,21 @@ QUALITY_MIN = 0.05       # 低于此值视为"坏单元"，触发局部加密
 # gmsh 4.9.5 直接 abort。等定下更合适的公式再打开。
 QUALITY_MAX_ROUNDS = 0
 QUALITY_BLOB_FACTOR = 0.5  # 加密目标的边长 = 坏单元当地边长的这个倍数
-SIZE_GROWTH = 1.3        # 相邻单元尺寸的增长倍数上限（决定加密过渡区半径）
+
+# 仿真区与端口的比例。抄自 comsol/cross_waveguide_test.java：那里是
+# L = 10、w = 1（par2 组），对应
+#   * 六边形外框的外接半径 = L = 10w，而正六边形的边长也等于外接半径，
+#     所以**边长/w = 10**；
+#   * 端口线 ls1 长 6w，居中放在六边形边上，两端各留 (10-6)/2 = 2w。
+# 我们原来用 L_sim = 0.5/cos(pi/6)（边长只有 7.22w），端口又一路画到六边形
+# 顶点。端口画到顶点有两个问题：端口平面离交叉口太近；而且顶点处相邻两条边
+# 成 120° 折角，COMSOL 的 Numeric 端口要在这条边界上解一维模式，端点落在折角
+# 上会解错/解不出来。留 2w 端部之后，端口两端的场已经衰减到 ~1e-3。
+SIM_SIDE_PER_W = 10.0    # 六边形边长（= 外接半径）/ 波导宽度
+PORT_LEN_PER_W = 6.0     # 端口边界长 / 波导宽度（居中；两端各留 2w 给散射边界）
+# 优化区起点到原点的距离（沿 e1）/ 波导宽度。把仿真区放大时这个固定不动，
+# 已经优化好的壁面形状才不会跟着变。原来的 0.2 = 0.5 - 0.3 就是这个量。
+L_OPT_START_PER_W = 2.5
 
 # 端口编号（对应 gmsh 里 add_physical 的顺序，见 build_mesh 末尾）
 PORT_IDS = np.array([3, 4, 5, 6], dtype=int)
@@ -59,8 +86,11 @@ class Geometry:
     """几何尺寸（不随优化变化的部分）。"""
 
     w_wg: float = 0.08
-    L_sim: float = 0.5 / cos(pi / 6)
-    L_wg_fixed: float = 0.3
+    # 边长 = SIM_SIDE_PER_W * w_wg（正六边形的边长等于外接半径）
+    L_sim: float = SIM_SIDE_PER_W * 0.08
+    # 端口平面在离原点 L_sim*cos(30°) 处；减掉 L_OPT_START 是为了让壁的固定端
+    # 留在原处 —— 放大仿真区只加长直段，已经优化好的部分一点不动。
+    L_wg_fixed: float = SIM_SIDE_PER_W * 0.08 * cos(pi / 6) - L_OPT_START_PER_W * 0.08
 
     @property
     def e1(self):
@@ -85,6 +115,20 @@ class Geometry:
     @property
     def wg_input_bd_in(self):
         return self.wg_input_cen - self.w_wg * self.e2 / 2
+
+    @property
+    def _port_half(self):
+        return 0.5 * PORT_LEN_PER_W * self.w_wg
+
+    @property
+    def port_edge_bd_in(self):
+        """端口边界在 in 一侧的端点（离端口中心 3w）。"""
+        return self.wg_input_cen - self._port_half * self.e2
+
+    @property
+    def port_edge_bd_ex(self):
+        """端口边界在 ex 一侧的端点（离端口中心 3w）。"""
+        return self.wg_input_cen + self._port_half * self.e2
 
     @property
     def wg_fixed_bd_ex(self):
@@ -494,6 +538,16 @@ def _guidance_wavelength(freq, epsilon):
     return 1.0 / (freq * index)
 
 
+def _growth_len(h_near, h_far):
+    """锥面长度：尺寸从 ``h_near`` 长到 ``h_far``，每单元最多放大 ``SIZE_GROWTH`` 倍。
+
+    gmsh 的 ``Threshold`` 在 ``[DistMin, DistMax]`` 内按距离**线性**插值，所以
+    只要 ``DistMax = (h_far - h_near) / (SIZE_GROWTH - 1)``，插值斜率就恰好是
+    ``dh/dd = SIZE_GROWTH - 1``，即相邻单元（间距 ~h）最多相差 ``SIZE_GROWTH`` 倍。
+    """
+    return max(h_far - h_near, 0.0) / max(SIZE_GROWTH - 1.0, 1e-9)
+
+
 def mesh_sizes(case):
     """剖分用的目标边长（含单位说明，全部是"边长"而不是"面积"）。
 
@@ -502,11 +556,17 @@ def mesh_sizes(case):
     生成的网格就满足同一个判据，而且各向同性、没有二分产生的层级痕迹。
     """
     ph = case.physics
+    h_wg = _guidance_wavelength(ph.freq, ph.epsilon_wg) / WL_PER_SIZE
+    h_air = _guidance_wavelength(ph.freq, ph.epsilon_amb) / WL_PER_SIZE
     return {
         "h_port": PORT_SIZE,
-        "h_wg": _guidance_wavelength(ph.freq, ph.epsilon_wg) / WL_PER_SIZE,
-        "h_air": _guidance_wavelength(ph.freq, ph.epsilon_amb) / WL_PER_SIZE,
+        "h_wg": h_wg,
+        "h_air": h_air,
         "grade_len": GRADE_LEN,
+        # 界面锥面的长度：从 h_wg 长到 h_air，每单元最多 SIZE_GROWTH 倍。
+        # 只有 h_wg < h_air（介质比包层"慢"）时才需要——反过来的话界面本来
+        # 就不该加密，_apply_size_field 会跳过这条锥面。
+        "iface_grade_len": _growth_len(h_wg, h_air),
     }
 
 
@@ -559,11 +619,24 @@ def _refine_blobs(report, h_floor):
     return blobs
 
 
-def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves, blobs=()):
+def _curve_tags(curves):
+    """gmsh 曲线 tag 列表。``_backward`` 出来的对象 ``_id`` 是负的（表示反向），
+    距离场只关心几何，取绝对值。"""
+    return [abs(int(c._id)) for c in curves]
+
+
+def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves,
+                      interface_curves=(), blobs=()):
     """把目标边长交给 gmsh 的背景尺寸场。
 
-    端口处 ``PORT_SIZE``，沿距离 ``GRADE_LEN`` 过渡到介质内部的目标尺寸
-    （波导和空气各一套，因为两者的波长不同）。
+    尺寸场是**两条锥面取 Min**：
+
+    * 端口 → 内部：以端口曲线为源，``PORT_SIZE`` 在 ``GRADE_LEN`` 内过渡到
+      ``h_wg`` / ``h_air``（波导和空气各一套，因为两者的波长不同）；
+    * 波导壁 → 空气：以界面曲线为源，``h_wg`` 在 ``iface_grade_len`` 内过渡到
+      ``h_air``。长度由 ``(h_air - h_wg) / (SIZE_GROWTH - 1)`` 反解，所以这条
+      锥面就是"离开界面后每单元最多放大 SIZE_GROWTH 倍"。只有空气侧需要它
+      （波导侧的 Threshold 已经保证 ≤ ``h_wg``）；介质比包层慢时才有意义。
 
     两个坑（都是实测出来的）：
 
@@ -579,7 +652,7 @@ def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves, blobs=()):
     F = gmsh.model.mesh.field
 
     dist = F.add("Distance")
-    F.setNumbers(dist, "CurvesList", [int(c._id) for c in port_curves])
+    F.setNumbers(dist, "CurvesList", _curve_tags(port_curves))
     F.setNumber(dist, "Sampling", DISTANCE_SAMPLING)
 
     def threshold(size_max, surfaces):
@@ -588,6 +661,11 @@ def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves, blobs=()):
         F.setNumber(tag, "SizeMin", sizes["h_port"])
         F.setNumber(tag, "SizeMax", size_max)
         F.setNumber(tag, "DistMin", 0.0)
+        # 端口带刻意用 GRADE_LEN 而不是 _growth_len：端口的一维网格钉在
+        # PORT_SIZE（S 参数积分精度），从 0.0037 按 1.3 倍长到 0.04 要 0.12 的
+        # 距离，实测单元数会从 7.4k 涨到 10.1k。GRADE_LEN 是这里唯一有意为之的
+        # "局部加速"；想严格全局服从 SIZE_GROWTH，把下一行换成
+        #   max(sizes["grade_len"], _growth_len(sizes["h_port"], size_max))
         F.setNumber(tag, "DistMax", sizes["grade_len"])
         restricted = F.add("Restrict")
         F.setNumber(restricted, "InField", tag)
@@ -598,11 +676,29 @@ def _apply_size_field(sizes, surfaces_wg, surfaces_air, port_curves, blobs=()):
     F.setString(port_value, "F", repr(float(sizes["h_port"])))
     port_field = F.add("Restrict")
     F.setNumber(port_field, "InField", port_value)
-    F.setNumbers(port_field, "CurvesList", [int(c._id) for c in port_curves])
+    F.setNumbers(port_field, "CurvesList", _curve_tags(port_curves))
 
     fields = [threshold(sizes["h_wg"], surfaces_wg),
               threshold(sizes["h_air"], surfaces_air),
               port_field]
+
+    # 界面锥面。SizeMin/SizeMax 必须 h_wg < h_air，否则这条场只会把空气
+    # 拉粗到 h_wg，反而不对——那种材料组合下直接不加。
+    if interface_curves and sizes["h_wg"] < sizes["h_air"]:
+        dist_if = F.add("Distance")
+        F.setNumbers(dist_if, "CurvesList", _curve_tags(interface_curves))
+        F.setNumber(dist_if, "Sampling", DISTANCE_SAMPLING)
+        cone = F.add("Threshold")
+        F.setNumber(cone, "InField", dist_if)
+        F.setNumber(cone, "SizeMin", sizes["h_wg"])
+        F.setNumber(cone, "SizeMax", sizes["h_air"])
+        F.setNumber(cone, "DistMin", 0.0)
+        F.setNumber(cone, "DistMax", sizes["iface_grade_len"])
+        restricted = F.add("Restrict")
+        F.setNumber(restricted, "InField", cone)
+        F.setNumbers(restricted, "SurfacesList", [int(s._id) for s in surfaces_air])
+        fields.append(restricted)
+
     for (bx, by, h_in, h_far, radius) in blobs:
         # 光滑的"尺寸凹陷"：h(r) = h_far - (h_far - h_in)·exp(-(r/σ)²)，再对 h_far
         # 取 min 保证不会把别处也变小。
@@ -757,70 +853,101 @@ def build_mesh(case):
     wg4 = model.add_plane_surface(model.add_curve_loop(curves))
 
     # ---- 外圈空气 ----
-    sim_region_pts = [pts((g.L_sim * cos(2 * pi * n / 6), g.L_sim * sin(2 * pi * n / 6)))
-                      for n in range(6)]
+    sim_corner = [np.array([g.L_sim * cos(2 * pi * n / 6),
+                            g.L_sim * sin(2 * pi * n / 6)]) for n in range(6)]
+    sim_region_pts = [pts(c) for c in sim_corner]
+
+    # 端口只占六边形边的中间 PORT_LEN_PER_W*w，两端各留 MARGIN*w（参考文件的 ls1）。
+    # 端部那条线**不打** physical 标签：C++ 侧对没有 id 的外边界统一加一阶散射
+    # 边界条件，正好和 COMSOL 里 Scattering 覆盖端部的做法一致。
+    margin_len = 0.5 * (SIM_SIDE_PER_W - PORT_LEN_PER_W) * g.w_wg
+
+    def split_port(a_xy, b_xy):
+        """把六边形边 a→b（b 是波导口角点）切成 margin 段 + 端口段。"""
+        d = (b_xy - a_xy) / np.linalg.norm(b_xy - a_xy)
+        m_xy = a_xy + margin_len * d
+        return (model.add_line(pts(a_xy), pts(m_xy)),
+                model.add_line(pts(m_xy), pts(b_xy)))
 
     curves = []
-    port_m0_air1 = [model.add_line(sim_region_pts[0], at(g.wg_input_bd_in, SCALES["m0"]))]
-    curves += port_m0_air1
+    port_m0_air1_margin, port_m0_air1 = split_port(
+        sim_corner[0], g.wg_input_bd_in * np.asarray(SCALES["m0"]))
+    curves += [port_m0_air1_margin]
+    curves += [port_m0_air1]
     curves += in_fixed_m0
     curves += in_opt_m0
     curves += in_opt_mx
     curves += in_fixed_mx
-    port_mx_air1 = [model.add_line(at(g.wg_input_bd_in, SCALES["mx"]), sim_region_pts[0])]
-    curves += port_mx_air1
+    port_mx_air1_margin, port_mx_air1 = split_port(sim_corner[0],
+                                                   g.wg_input_bd_in * np.asarray(SCALES["mx"]))
+    curves += [-port_mx_air1, -port_mx_air1_margin]
     air1 = model.add_plane_surface(model.add_curve_loop(curves))
 
     curves = []
     curves += [model.add_line(sim_region_pts[1], sim_region_pts[2])]
-    port_my_air2 = [model.add_line(sim_region_pts[2], at(g.wg_input_bd_ex, SCALES["my"]))]
-    curves += port_my_air2
+    port_my_air2_margin, port_my_air2 = split_port(sim_corner[2],
+                                                  g.wg_input_bd_ex * np.asarray(SCALES["my"]))
+    curves += [port_my_air2_margin, port_my_air2]
     curves += ex_fixed_my
     curves += ex_opt_my
     curves += ex_opt_m0
     curves += ex_fixed_m0
-    port_m0_air2 = [model.add_line(at(g.wg_input_bd_ex, SCALES["m0"]), sim_region_pts[1])]
-    curves += port_m0_air2
+    port_m0_air2_margin, port_m0_air2 = split_port(sim_corner[1],
+                                                   g.wg_input_bd_ex * np.asarray(SCALES["m0"]))
+    curves += [-port_m0_air2, -port_m0_air2_margin]
     air2 = model.add_plane_surface(model.add_curve_loop(curves))
 
     curves = []
-    port_mxy_air3 = [model.add_line(sim_region_pts[3], at(g.wg_input_bd_in, SCALES["mxy"]))]
-    curves += port_mxy_air3
+    port_mxy_air3_margin, port_mxy_air3 = split_port(
+        sim_corner[3], g.wg_input_bd_in * np.asarray(SCALES["mxy"]))
+    curves += [port_mxy_air3_margin, port_mxy_air3]
     curves += in_fixed_mxy
     curves += in_opt_mxy
     curves += in_opt_my
     curves += in_fixed_my
-    port_my_air3 = [model.add_line(at(g.wg_input_bd_in, SCALES["my"]), sim_region_pts[3])]
-    curves += port_my_air3
+    port_my_air3_margin, port_my_air3 = split_port(sim_corner[3],
+                                                   g.wg_input_bd_in * np.asarray(SCALES["my"]))
+    curves += [-port_my_air3, -port_my_air3_margin]
     air3 = model.add_plane_surface(model.add_curve_loop(curves))
 
     curves = []
     curves += [model.add_line(sim_region_pts[4], sim_region_pts[5])]
-    port_mx_air4 = [model.add_line(sim_region_pts[5], at(g.wg_input_bd_ex, SCALES["mx"]))]
-    curves += port_mx_air4
+    port_mx_air4_margin, port_mx_air4 = split_port(sim_corner[5],
+                                                  g.wg_input_bd_ex * np.asarray(SCALES["mx"]))
+    curves += [port_mx_air4_margin, port_mx_air4]
     curves += ex_fixed_mx
     curves += ex_opt_mx
     curves += ex_opt_mxy
     curves += ex_fixed_mxy
-    port_mxy_air4 = [model.add_line(at(g.wg_input_bd_ex, SCALES["mxy"]), sim_region_pts[4])]
-    curves += port_mxy_air4
+    port_mxy_air4_margin, port_mxy_air4 = split_port(
+        sim_corner[4], g.wg_input_bd_ex * np.asarray(SCALES["mxy"]))
+    curves += [-port_mxy_air4, -port_mxy_air4_margin]
     air4 = model.add_plane_surface(model.add_curve_loop(curves))
 
     model.synchronize()
     model.add_physical([wg1, wg2, wg3, wg4], "waveguide")
     model.add_physical([air1, air2, air3, air4], "air")
-    model.add_physical(input_bd_m0 + port_m0_air1 + port_m0_air2, "input")
-    model.add_physical(input_bd_mxy + port_mxy_air3 + port_mxy_air4, "output1")
-    model.add_physical(input_bd_mx + port_mx_air1 + port_mx_air4, "output21")
-    model.add_physical(input_bd_my + port_my_air2 + port_my_air3, "output22")
+    # 端口 = 中间 6w 的三段（口径 + 两段 3w→w/2），端部那 8 段不打标签
+    model.add_physical(input_bd_m0 + [port_m0_air1, port_m0_air2], "input")
+    model.add_physical(input_bd_mxy + [port_mxy_air3, port_mxy_air4], "output1")
+    model.add_physical(input_bd_mx + [port_mx_air1, port_mx_air4], "output21")
+    model.add_physical(input_bd_my + [port_my_air2, port_my_air3], "output22")
     model.add_physical(ex_opt_m0 + ex_opt_mx + ex_opt_my + ex_opt_mxy, "ex_opt")
     model.add_physical(in_opt_m0 + in_opt_mx + in_opt_my + in_opt_mxy, "in_opt")
 
     # 端口曲线（4 个端口 × 口径 + 两条径线）：尺寸场在这里加密到 PORT_SIZE
-    port_curves = (input_bd_m0 + port_m0_air1 + port_m0_air2
-                   + input_bd_mxy + port_mxy_air3 + port_mxy_air4
-                   + input_bd_mx + port_mx_air1 + port_mx_air4
-                   + input_bd_my + port_my_air2 + port_my_air3)
+    port_curves = (input_bd_m0 + [port_m0_air1, port_m0_air2]
+                   + input_bd_mxy + [port_mxy_air3, port_mxy_air4]
+                   + input_bd_mx + [port_mx_air1, port_mx_air4]
+                   + input_bd_my + [port_my_air2, port_my_air3])
+    # 波导–空气界面：四象限的优化曲线（in_opt/ex_opt，用未取反的原对象，tag 才是
+    # 正的）加四段固定壁。端口口径（input_bd_*）不算——它在最外圈，由上面那条
+    # 端口 Distance 场负责；两根到原点的径线也不算——那是波导自己的内部边界。
+    interface_curves = []
+    for key in ("m0", "mx", "my", "mxy"):
+        interface_curves += list(in_curves[key]) + list(ex_curves[key])
+    interface_curves += in_fixed_m0 + in_fixed_mx + in_fixed_my + in_fixed_mxy
+    interface_curves += ex_fixed_m0 + ex_fixed_mx + ex_fixed_my + ex_fixed_mxy
     # 写 MSH 2.2 而不是默认的 4.1：libMesh 1.9 读 4.x 时会校验 $Entities 里
     # 每条 curve 的包围盒，而 gmsh 4.9.5 给**曲边**算的包围盒比真实曲线小
     # 一点点（实测 5.5e-6，而 libMesh 的相对容差只有 1e-8 量级），于是读网格
@@ -836,7 +963,8 @@ def build_mesh(case):
     blobs = ()
     quality = None
     for attempt in range(QUALITY_MAX_ROUNDS + 1):
-        _apply_size_field(sizes, wg_surfaces, air_surfaces, port_curves, blobs)
+        _apply_size_field(sizes, wg_surfaces, air_surfaces, port_curves,
+                          interface_curves if IFACE_GRADING else (), blobs)
         model.generate_mesh(dim=2, order=2)
         gmsh.write(case.mesh_file)
         if attempt == QUALITY_MAX_ROUNDS:
@@ -957,6 +1085,9 @@ def write_design(case):
             "h_wg": float(sizes["h_wg"]),
             "h_air": float(sizes["h_air"]),
             "grade_len": float(sizes["grade_len"]),
+            "iface_grading": bool(IFACE_GRADING),
+            "iface_grade_len": float(sizes["iface_grade_len"]),
+            "size_growth": float(SIZE_GROWTH),
         },
         **ports,
     )

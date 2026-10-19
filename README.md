@@ -30,6 +30,7 @@
 │   ├── solver.py               求解器控制：写 infile.pot、调 mpiexec、校验、读结果
 │   ├── optimizer.py            主优化器：目标/梯度封装 + 梯度下降
 │   ├── postproc.py             后处理：读场、按 physical group 给网格上色、pyvista 可视化
+│   ├── export_comsol.py        导出：把一版结果写成 COMSOL 能导入的 DXF + 校核表
 │   ├── dataio.py               数据契约：design.h5 / result.h5
 │   ├── paths.py                统一的路径/命令入口
 │   └── tests/                  pytest：数据契约、设计变量映射、有限差分（可选）
@@ -100,6 +101,70 @@ end point mode:0
 
 `data/infile.pot` 是求解器的全部运行参数（频率、介电常数、端口、Bézier 端点模式等），
 格式是 GetPot。
+
+## 导出到 COMSOL
+
+优化结果只有 44 个设计变量，导出的本质是**一次几何求值**：
+
+```
+make comsol          # 等价于 cd data && python3 ../python/export_comsol.py
+```
+
+产物在 `data/comsol/`：
+
+- **`cross_waveguide_optimized.java` —— 主产物。** 与 `comsol/cross_waveguide_test.java`
+  （优化前那份）是同一套东西：`ewfd` + `outofplane`、4 个 `Numeric` 端口 + 4 步
+  `Boundary Mode Analysis`、非端口外边界用 `Scattering`、材料用 `RefractiveIndex`
+  填 $n = sqrt(epsilon)$、结果取 `ewfd.Rtotal/Ttotal/Atotal` 与 `S11..S41`。
+  只把几何换成了优化后的形状，并且**直接用 `CubicBezier` 建**：它的 `p` 属性就是
+  四个控制点，而 `design.bezier_polygons()` 给出的正是这些控制点，所以既没有 DXF
+  导入的容差问题，也没有插值曲线的近似（每条壁 11 段 × 8 条 = 88 个特征）。
+- `geometry.dxf` —— 同一几何的 DXF，按 label 分图层（12 段端口边 / 10 条散射边界 /
+  8 条固定直壁段 / 8 条优化壁，共 38 个实体）。想手工搭、或者只想看图时用。每条
+  优化壁写成一个 `SPLINE` 实体：11 段 C² 复合三次 Bézier 恰好等价于一条两端四重、
+  中间单重的三次 B-spline（14 控制点 / 18 节点），配置法解出的控制点与
+  `Bezier_interp` 的偏差是 $10^(-16)$ 量级。
+- `CHECK.md` —— 建完逐项核对的数字（边长、端口长、总面积、域个数、壁弧长、尖端坐标、
+  $beta$、$n_"eff"$、$lambda_"guided"$）+ COMSOL 侧每一项设置。
+
+### 仿真区与端口的比例
+
+照 `comsol/cross_waveguide_test.java`（那里 `L = 10`、`w = 1`）：
+
+| 量 | 比例 | 我们现在的值 |
+|---|---|---|
+| 六边形边长（= 外接半径） | $10 w$ | `0.8` = 10w |
+| 每条端口边界长 | $6 w$ | `0.48` = 6w |
+| 端口两端各留的端部 | $2 w$ | `0.16` = 2w |
+| 端口平面到中心 | $8.66 w$ | `0.6928` |
+
+**端口不能画到六边形顶点。** COMSOL 的 `Numeric` 端口要在这条边界上解一维模式，
+端点落在顶点上就是落在相邻两条边的 120° 折角上，模式解不出来。留 2w 端部之后，
+端口两端的场已经衰减到 $10^(-3)$ 量级。为此端口边被切成 5 段（中间 3 段是端口），
+端部那 8 段和 2 条整的非端口边一起由散射边界条件吸收——参考文件里 `sctr1` 选中的
+10 条边正好也是这么数的。
+
+把仿真区放大时 `L_wg_fixed` 要同步加长（`L_wg_fixed = L_sim*cos30 - 2.5 w`），
+否则壁的固定端会跟着往外跑、已经优化好的形状就变了。
+
+三处不做会静默出错：
+
+1. **非端口外边界是散射边界条件，不是 PEC。** 求解器在那里加的是
+   $gamma = -i k_0 n_"amb"$，而 `ewfd` 的默认外边界正是 PEC（$E_z = 0$）。
+2. **端口不能碰顶点**（见上）。
+3. **4 个尖端要单独压尺寸**（$approx 10^(-3)$）。端点被端点角罚项推到几乎垂直于
+   对称轴，尖端曲率半径只有 `3e-3`…`4e-3`，全局 $lambda/16$ 的网格在那里会出很差
+   的单元。参考文件没有这个坑，它的几何是两条直矩形。
+
+选择（端口 / 散射边界 / 材料域 / 尖端）全部用**按坐标的 `Box` 选择**，不写死实体
+编号——编号随几何变化，坐标不会。这批选择框的取法可以离线严格验证：COMSOL 的
+`condition = "inside"` 对轴对齐框等价于"实体包围盒落在框内"，所以
+`export_comsol.verify_selections()` 能在没有 COMSOL 的情况下确认每个框恰好框住
+该框的东西（`make comsol` 每次都会跑，不通过就报错）。
+
+轴对齐框的另一个好处是它顺便解决了 DXF 的由来：gmsh 4.9.5 的**内置** geometry
+kernel 导不出 DXF（`write("x.dxf")` 报 `Unknown output file format`），STEP 只认 OCC
+kernel，而几何是用内置 kernel 建的，所以 DXF 是手写的（`--polyline` 是退路）。
 
 ## 方法
 

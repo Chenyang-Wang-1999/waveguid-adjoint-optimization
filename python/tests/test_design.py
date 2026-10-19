@@ -199,3 +199,23 @@ def test_case_load_rejects_missing_dofs(tmp_path):
     )
     with pytest.raises(ValueError, match="dofs"):
         design.Case.load(str(monkeypatch_path))
+
+
+def test_mesh_sizes_interface_cone():
+    """界面锥面的长度必须满足 h(d) = h_wg + (SIZE_GROWTH - 1)·d。
+
+    这是"离开界面后每单元最多放大 SIZE_GROWTH 倍"的唯一依据：gmsh 的
+    Threshold 在 [0, DistMax] 内按距离线性插值，所以 DistMax 取
+    (h_air - h_wg) / (SIZE_GROWTH - 1) 时斜率才恰好是 SIZE_GROWTH - 1。
+    """
+    case = design.Case(dofs=np.zeros(8))
+    sizes = design.mesh_sizes(case)
+    assert sizes["h_wg"] < sizes["h_air"]      # 当前物理参数下锥面才会启用
+    slope = (sizes["h_air"] - sizes["h_wg"]) / sizes["iface_grade_len"]
+    assert np.isclose(slope, design.SIZE_GROWTH - 1.0)
+
+
+def test_growth_len_never_negative():
+    """h_far <= h_near 时要退回 0，不能给出负长度（gmsh 会拒绝）。"""
+    assert design._growth_len(0.04, 0.01) == 0.0
+    assert design._growth_len(0.01, 0.04) > 0.0

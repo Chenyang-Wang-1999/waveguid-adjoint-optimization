@@ -5,6 +5,7 @@
 *.a
 *.la
 *.lo
+*.class
 waveguide_optimization/waveguide_optimization
 waveguide_optimization/waveguide_optimization.exe
 
@@ -41,3 +42,7 @@ docs/build/
 
 # ---- 整理期间的临时目录 ------------------------------------------------
 .docwork/
+
+
+# ---- 大型二进制文件 ----
+*.mph

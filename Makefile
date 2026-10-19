@@ -52,7 +52,7 @@ TARGET   := $(SRCDIR)/waveguide_optimization
 PYEXT    := $(shell $(PYTHON)-config --extension-suffix 2>/dev/null || echo .so)
 PYTARGET := python/Bezier$(PYEXT)
 
-.PHONY: all run python docs clean distclean help
+.PHONY: all run python comsol docs clean distclean help
 
 all: $(TARGET)
 
@@ -76,6 +76,10 @@ $(PYTARGET): $(SRCDIR)/Bezier.cpp $(SRCDIR)/Bezier.h $(SRCDIR)/TriDiagonal.h
 run: $(TARGET)
 	cd data && mpiexec -n 1 ../$(TARGET) $(ARGS)
 
+# 把当前这版设计导出成 COMSOL 能导入的 DXF + 校核表（输出在 data/comsol/）
+comsol: python
+	cd data && $(PYTHON) ../python/export_comsol.py
+
 docs:
 	./docs/build.sh
 
@@ -92,6 +96,7 @@ help:
 	@echo "make METHOD=dbg      用 libMesh 的 dbg 模式编译"
 	@echo "make python          编译 python/Bezier*.so"
 	@echo "make run ARGS=...    在 data/ 里跑一次"
+	@echo "make comsol          导出 DXF + 校核表到 data/comsol/"
 	@echo "make docs            编译 Typst 文档"
 	@echo "make clean           清理编译产物"
 	@echo ""
